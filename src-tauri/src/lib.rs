@@ -10,6 +10,37 @@ const MENU_TOGGLE_SCANNING: &str = "toggle-scanning";
 const MENU_SETTINGS: &str = "open-settings";
 const MENU_QUIT: &str = "quit";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayMenuAction {
+    OpenDashboard,
+    ToggleScanning,
+    OpenSettings,
+    Quit,
+}
+
+fn parse_tray_menu_action(id: &str) -> Option<TrayMenuAction> {
+    match id {
+        MENU_OPEN_DASHBOARD => Some(TrayMenuAction::OpenDashboard),
+        MENU_TOGGLE_SCANNING => Some(TrayMenuAction::ToggleScanning),
+        MENU_SETTINGS => Some(TrayMenuAction::OpenSettings),
+        MENU_QUIT => Some(TrayMenuAction::Quit),
+        _ => None,
+    }
+}
+
+fn next_scanning_state(is_paused: bool) -> (bool, &'static str) {
+    let next_state = !is_paused;
+    let state_label = if next_state { "paused" } else { "resumed" };
+    (next_state, state_label)
+}
+
+fn should_show_dashboard_from_tray_click(
+    button: MouseButton,
+    button_state: MouseButtonState,
+) -> bool {
+    button == MouseButton::Left && button_state == MouseButtonState::Up
+}
+
 fn show_dashboard<R: Runtime>(app: &AppHandle<R>) {
     match app.get_webview_window("main") {
         Some(window) => {
@@ -38,14 +69,13 @@ fn hide_dashboard<R: Runtime>(window: &Window<R>) {
 fn toggle_scanning_pause<R: Runtime>(pause_item: &CheckMenuItem<R>) {
     match pause_item.is_checked() {
         Ok(is_paused) => {
-            let next_state = !is_paused;
+            let (next_state, state_label) = next_scanning_state(is_paused);
 
             if let Err(error) = pause_item.set_checked(next_state) {
                 eprintln!("Failed to update the tray pause state: {error}");
                 return;
             }
 
-            let state_label = if next_state { "paused" } else { "resumed" };
             println!("TrendWave scanning is now {state_label}.");
         }
         Err(error) => eprintln!("Failed to read the tray pause state: {error}"),
@@ -78,24 +108,30 @@ fn build_tray<R: Runtime>(app: &mut App<R>) -> tauri::Result<()> {
         .menu(&tray_menu)
         .tooltip("TrendWave")
         .show_menu_on_left_click(false)
-        .on_menu_event(move |app, event| match event.id().as_ref() {
-            MENU_OPEN_DASHBOARD => show_dashboard(app),
-            MENU_TOGGLE_SCANNING => toggle_scanning_pause(&pause_item_for_handler),
-            MENU_SETTINGS => {
-                println!("TrendWave settings will live in the dashboard in a later phase.");
-                show_dashboard(app);
-            }
-            MENU_QUIT => app.exit(0),
-            _ => {}
-        })
+        .on_menu_event(
+            move |app, event| match parse_tray_menu_action(event.id().as_ref()) {
+                Some(TrayMenuAction::OpenDashboard) => show_dashboard(app),
+                Some(TrayMenuAction::ToggleScanning) => {
+                    toggle_scanning_pause(&pause_item_for_handler)
+                }
+                Some(TrayMenuAction::OpenSettings) => {
+                    println!("TrendWave settings will live in the dashboard in a later phase.");
+                    show_dashboard(app);
+                }
+                Some(TrayMenuAction::Quit) => app.exit(0),
+                None => {}
+            },
+        )
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
+                button,
+                button_state,
                 ..
             } = event
             {
-                show_dashboard(tray.app_handle());
+                if should_show_dashboard_from_tray_click(button, button_state) {
+                    show_dashboard(tray.app_handle());
+                }
             }
         });
 
@@ -134,5 +170,66 @@ pub fn run() {
     if let Err(error) = app_result {
         eprintln!("TrendWave failed to start: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_known_tray_menu_actions() {
+        assert_eq!(
+            parse_tray_menu_action(MENU_OPEN_DASHBOARD),
+            Some(TrayMenuAction::OpenDashboard)
+        );
+        assert_eq!(
+            parse_tray_menu_action(MENU_TOGGLE_SCANNING),
+            Some(TrayMenuAction::ToggleScanning)
+        );
+        assert_eq!(
+            parse_tray_menu_action(MENU_SETTINGS),
+            Some(TrayMenuAction::OpenSettings)
+        );
+        assert_eq!(
+            parse_tray_menu_action(MENU_QUIT),
+            Some(TrayMenuAction::Quit)
+        );
+    }
+
+    #[test]
+    fn ignores_unknown_tray_menu_actions() {
+        assert_eq!(parse_tray_menu_action("not-a-real-menu-item"), None);
+    }
+
+    #[test]
+    fn toggling_scanning_from_running_pauses_it() {
+        assert_eq!(next_scanning_state(false), (true, "paused"));
+    }
+
+    #[test]
+    fn toggling_scanning_from_paused_resumes_it() {
+        assert_eq!(next_scanning_state(true), (false, "resumed"));
+    }
+
+    #[test]
+    fn only_left_button_release_opens_the_dashboard() {
+        assert!(should_show_dashboard_from_tray_click(
+            MouseButton::Left,
+            MouseButtonState::Up
+        ));
+
+        assert!(!should_show_dashboard_from_tray_click(
+            MouseButton::Left,
+            MouseButtonState::Down
+        ));
+        assert!(!should_show_dashboard_from_tray_click(
+            MouseButton::Right,
+            MouseButtonState::Up
+        ));
+        assert!(!should_show_dashboard_from_tray_click(
+            MouseButton::Middle,
+            MouseButtonState::Up
+        ));
     }
 }
