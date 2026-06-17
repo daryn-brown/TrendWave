@@ -1,0 +1,135 @@
+use std::sync::{Mutex, MutexGuard};
+
+use rusqlite::Connection;
+use tauri::ipc::Channel;
+use tauri::State;
+
+use crate::db::{self, Watchlist};
+use crate::error::{AppError, AppResult};
+use crate::model::{ProgressEvent, ResearchResult};
+use crate::ollama::OllamaClient;
+use crate::research;
+use crate::settings::Settings;
+
+/// Shared application state managed by Tauri. The SQLite connection lives behind
+/// a `Mutex` (rusqlite's `Connection` is not `Sync`); we only ever hold the lock
+/// for short, synchronous queries and never across an `.await`. The HTTP client
+/// is internally ref-counted and cheap to clone for each async task.
+pub struct AppState {
+    pub db: Mutex<Connection>,
+    pub http: reqwest::Client,
+}
+
+impl AppState {
+    fn lock_db(&self) -> AppResult<MutexGuard<'_, Connection>> {
+        self.db
+            .lock()
+            .map_err(|_| AppError::Database("database lock was poisoned".into()))
+    }
+}
+
+#[tauri::command]
+pub async fn run_research(
+    state: State<'_, AppState>,
+    prompt: String,
+    on_event: Channel<ProgressEvent>,
+) -> AppResult<ResearchResult> {
+    execute(&state, &prompt, &on_event).await
+}
+
+#[tauri::command]
+pub async fn run_watchlist(
+    state: State<'_, AppState>,
+    id: i64,
+    on_event: Channel<ProgressEvent>,
+) -> AppResult<ResearchResult> {
+    let prompt = {
+        let conn = state.lock_db()?;
+        db::get_watchlist(&conn, id)?.prompt
+    };
+    let result = execute(&state, &prompt, &on_event).await?;
+    let conn = state.lock_db()?;
+    db::update_watchlist_result(&conn, id, &result)?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn get_settings(state: State<'_, AppState>) -> AppResult<Settings> {
+    let conn = state.lock_db()?;
+    db::load_settings(&conn)
+}
+
+#[tauri::command]
+pub async fn save_settings(state: State<'_, AppState>, settings: Settings) -> AppResult<()> {
+    let conn = state.lock_db()?;
+    db::save_settings(&conn, &settings)
+}
+
+#[tauri::command]
+pub async fn list_watchlists(state: State<'_, AppState>) -> AppResult<Vec<Watchlist>> {
+    let conn = state.lock_db()?;
+    db::list_watchlists(&conn)
+}
+
+#[tauri::command]
+pub async fn create_watchlist(
+    state: State<'_, AppState>,
+    name: String,
+    prompt: String,
+) -> AppResult<Watchlist> {
+    let conn = state.lock_db()?;
+    db::create_watchlist(&conn, &name, &prompt)
+}
+
+#[tauri::command]
+pub async fn delete_watchlist(state: State<'_, AppState>, id: i64) -> AppResult<()> {
+    let conn = state.lock_db()?;
+    db::delete_watchlist(&conn, id)
+}
+
+/// Shared body for both the ad-hoc prompt and watchlist re-runs: load settings,
+/// confirm Ollama is ready (so failures are one clear message), then stream the
+/// pipeline's progress to the frontend channel.
+async fn execute(
+    state: &AppState,
+    prompt: &str,
+    on_event: &Channel<ProgressEvent>,
+) -> AppResult<ResearchResult> {
+    if prompt.trim().is_empty() {
+        return Err(AppError::Other("Please enter a question first.".into()));
+    }
+
+    let settings = {
+        let conn = state.lock_db()?;
+        db::load_settings(&conn)?
+    };
+
+    let ollama = OllamaClient::new(
+        state.http.clone(),
+        settings.ollama_endpoint.clone(),
+        settings.model.clone(),
+    );
+
+    if let Err(err) = ollama.ensure_ready().await {
+        let _ = on_event.send(ProgressEvent::Failed {
+            kind: err.kind().to_string(),
+            message: err.to_string(),
+        });
+        return Err(err);
+    }
+
+    let emit = |event: ProgressEvent| {
+        let _ = on_event.send(event);
+    };
+
+    match research::run_research(&ollama, &state.http, &settings, prompt, &emit).await {
+        Ok(result) => Ok(result),
+        Err(err) => {
+            let _ = on_event.send(ProgressEvent::Failed {
+                kind: err.kind().to_string(),
+                message: err.to_string(),
+            });
+            Err(err)
+        }
+    }
+}
