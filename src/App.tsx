@@ -1,105 +1,390 @@
+import { useEffect, useState } from "react";
 import "./App.css";
+import * as api from "./api";
+import {
+  BottleneckList,
+  CandidateCard,
+  ErrorBanner,
+  IconRefresh,
+  IconSearch,
+  IconSparkles,
+  IconSpinner,
+  ProgressLog,
+  SettingsModal,
+  WatchlistSidebar,
+} from "./components";
+import type {
+  AppErrorShape,
+  Bottleneck,
+  Candidate,
+  ProgressEvent,
+  ResearchResult,
+  Settings,
+  Watchlist,
+} from "./types";
 
-const roadmap = [
-  {
-    phase: "Phase 1",
-    title: "Tray-First Shell",
-    detail: "The app now starts in the background and opens from the tray.",
-  },
-  {
-    phase: "Phase 2",
-    title: "SQLite Brain",
-    detail: "We will persist tickers, daily metrics, and alerts locally.",
-  },
-  {
-    phase: "Phase 3",
-    title: "Async Scanner",
-    detail: "Tokio and reqwest will power the background market polling loop.",
-  },
-  {
-    phase: "Phase 4",
-    title: "Dashboard",
-    detail: "The UI will grow into a sector heatmap, alert feed, and settings view.",
-  },
+const EXAMPLES = [
+  "Where are the bottlenecks in the AI data-center buildout?",
+  "What's constraining solid-state battery production?",
+  "Supply chokepoints in domestic semiconductor packaging?",
 ];
 
-function App() {
+export default function App() {
+  const [prompt, setPrompt] = useState("");
+  const [running, setRunning] = useState(false);
+  const [messages, setMessages] = useState<string[]>([]);
+  const [bottlenecks, setBottlenecks] = useState<Bottleneck[]>([]);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [result, setResult] = useState<ResearchResult | null>(null);
+  const [error, setError] = useState<AppErrorShape | null>(null);
+
+  const [watchlists, setWatchlists] = useState<Watchlist[]>([]);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
+  const [saveName, setSaveName] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.getSettings().then(setSettings).catch(() => {});
+    refreshWatchlists();
+  }, []);
+
+  const refreshWatchlists = () =>
+    api.listWatchlists().then(setWatchlists).catch(() => {});
+
+  const resetView = () => {
+    setMessages([]);
+    setBottlenecks([]);
+    setCandidates([]);
+    setResult(null);
+    setError(null);
+  };
+
+  const handleEvent = (event: ProgressEvent) => {
+    switch (event.type) {
+      case "stage":
+        setMessages((m) => [...m, event.message]);
+        break;
+      case "bottlenecks":
+        setBottlenecks(event.items);
+        break;
+      case "candidate":
+        setCandidates((c) => [...c, event.candidate]);
+        break;
+      case "done":
+        setResult(event.result);
+        setBottlenecks(event.result.bottlenecks);
+        setCandidates(event.result.candidates);
+        break;
+      case "failed":
+        setError({ kind: event.kind, message: event.message });
+        break;
+    }
+  };
+
+  async function execute(run: () => Promise<ResearchResult>) {
+    resetView();
+    setRunning(true);
+    try {
+      const res = await run();
+      setResult(res);
+      setBottlenecks(res.bottlenecks);
+      setCandidates(res.candidates);
+      refreshWatchlists();
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const handleSearch = (text: string) => {
+    const q = text.trim();
+    if (!q || running) return;
+    setPrompt(q);
+    setActiveId(null);
+    execute(() => api.runResearch(q, handleEvent));
+  };
+
+  const handleSelectWatchlist = (w: Watchlist) => {
+    setActiveId(w.id);
+    setPrompt(w.prompt);
+    setError(null);
+    setMessages([]);
+    if (w.last_result) {
+      setResult(w.last_result);
+      setBottlenecks(w.last_result.bottlenecks);
+      setCandidates(w.last_result.candidates);
+    } else {
+      setResult(null);
+      setBottlenecks([]);
+      setCandidates([]);
+    }
+  };
+
+  const handleRerun = () => {
+    if (activeId == null || running) return;
+    const id = activeId;
+    execute(() => api.runWatchlist(id, handleEvent));
+  };
+
+  const handleNew = () => {
+    setActiveId(null);
+    setPrompt("");
+    resetView();
+  };
+
+  const handleDelete = async (id: number) => {
+    await api.deleteWatchlist(id).catch(() => {});
+    if (activeId === id) handleNew();
+    refreshWatchlists();
+  };
+
+  const confirmSave = async () => {
+    const name = (saveName || "").trim();
+    if (!name || !prompt.trim()) {
+      setSaveName(null);
+      return;
+    }
+    const created = await api.createWatchlist(name, prompt.trim()).catch(() => null);
+    setSaveName(null);
+    if (created) {
+      setActiveId(created.id);
+      refreshWatchlists();
+    }
+  };
+
+  const handleSaveSettings = async (s: Settings) => {
+    await api.saveSettings(s).catch(() => {});
+    setSettings(s);
+    setShowSettings(false);
+  };
+
+  const hasResults = bottlenecks.length > 0 || candidates.length > 0;
+
   return (
-    <main className="min-h-screen bg-[radial-gradient(circle_at_top,_#dbeafe,_#f8fafc_55%,_#e2e8f0)] px-6 py-10 text-slate-950">
-      <div className="mx-auto flex max-w-5xl flex-col gap-8">
-        <section className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/80 p-8 shadow-[0_30px_80px_-40px_rgba(15,23,42,0.45)] backdrop-blur">
-          <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
-            <div className="max-w-2xl">
-              <p className="text-sm font-semibold uppercase tracking-[0.35em] text-sky-700">
-                TrendWave
-              </p>
-              <h1 className="mt-4 text-4xl font-semibold tracking-tight text-slate-950 sm:text-5xl">
-                A background-first market scanner with a Rust core.
-              </h1>
-              <p className="mt-4 text-lg leading-8 text-slate-600">
-                This dashboard is intentionally simple for now. Phase 1 is about
-                the tray-first shell, so the real milestone is that TrendWave
-                now opens from the tray instead of launching into your face.
-              </p>
+    <div className="flex h-full bg-[radial-gradient(circle_at_top,_#eff6ff,_#f8fafc_60%)] text-slate-900">
+      <WatchlistSidebar
+        watchlists={watchlists}
+        activeId={activeId}
+        onSelect={handleSelectWatchlist}
+        onDelete={handleDelete}
+        onNew={handleNew}
+        onOpenSettings={() => setShowSettings(true)}
+      />
+
+      <main className="flex-1 overflow-y-auto">
+        <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
+          <header>
+            <h1 className="text-2xl font-bold tracking-tight">Find the bottleneck. Find the stock.</h1>
+            <p className="mt-1 text-sm text-slate-500">
+              Ask about an industry. TrendWave finds the supply chokepoints, then the cheap, under-the-radar
+              names exposed to them — all locally via Ollama.
+            </p>
+          </header>
+
+          <PromptBar
+            value={prompt}
+            running={running}
+            onChange={setPrompt}
+            onSubmit={() => handleSearch(prompt)}
+          />
+
+          {!hasResults && !running && (
+            <div className="flex flex-wrap gap-2">
+              {EXAMPLES.map((ex) => (
+                <button
+                  key={ex}
+                  onClick={() => handleSearch(ex)}
+                  className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5 text-xs text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                >
+                  {ex}
+                </button>
+              ))}
             </div>
+          )}
 
-            <div className="rounded-3xl border border-slate-200 bg-slate-950 px-5 py-4 text-sm text-slate-100 shadow-lg">
-              <p className="font-medium text-emerald-300">Status</p>
-              <p className="mt-2 text-slate-300">
-                Tray shell in progress
-              </p>
-              <p className="mt-1 text-slate-400">
-                SQLite and scanning arrive next
-              </p>
-            </div>
-          </div>
-        </section>
+          {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {roadmap.map((item) => (
-            <article
-              key={item.phase}
-              className="rounded-[1.5rem] border border-slate-200/80 bg-white/85 p-5 shadow-[0_20px_50px_-35px_rgba(15,23,42,0.45)]"
-            >
-              <p className="text-sm font-semibold uppercase tracking-[0.25em] text-slate-500">
-                {item.phase}
-              </p>
-              <h2 className="mt-3 text-2xl font-semibold text-slate-950">
-                {item.title}
-              </h2>
-              <p className="mt-3 text-sm leading-7 text-slate-600">
-                {item.detail}
-              </p>
-            </article>
-          ))}
-        </section>
+          {running && <ProgressLog messages={messages} running={running} />}
 
-        <section className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
-          <article className="rounded-[1.75rem] border border-slate-200/80 bg-slate-950 p-6 text-slate-100 shadow-[0_24px_60px_-35px_rgba(15,23,42,0.6)]">
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-sky-300">
-              What To Try
+          {(hasResults || result) && (
+            <ResultsHeader
+              result={result}
+              activeId={activeId}
+              running={running}
+              canSave={!!prompt.trim()}
+              onRerun={handleRerun}
+              onSave={() => setSaveName("")}
+            />
+          )}
+
+          <BottleneckList items={bottlenecks} />
+
+          {candidates.length > 0 && (
+            <section className="space-y-3">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
+                Candidates ({candidates.length})
+              </h3>
+              <div className="space-y-4">
+                {candidates.map((c, i) => (
+                  <CandidateCard key={`${c.ticker}-${i}`} candidate={c} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {result && candidates.length === 0 && !running && (
+            <p className="rounded-2xl border border-slate-200 bg-white/70 p-4 text-sm text-slate-500">
+              No candidates cleared your filters. Try widening the price cap or lowering the minimum score in
+              Settings, or rephrase the industry.
             </p>
-            <ul className="mt-5 space-y-3 text-sm leading-7 text-slate-300">
-              <li>Open the tray icon and choose "Open Dashboard".</li>
-              <li>Close the window and notice that the app keeps running in the tray.</li>
-              <li>Toggle "Pause Scanning" to see the tray state change before Phase 3 exists.</li>
-            </ul>
-          </article>
+          )}
 
-          <article className="rounded-[1.75rem] border border-white/80 bg-white/85 p-6 shadow-[0_24px_60px_-35px_rgba(15,23,42,0.45)]">
-            <p className="text-sm font-semibold uppercase tracking-[0.3em] text-amber-600">
-              Rust Focus
-            </p>
-            <p className="mt-4 text-sm leading-7 text-slate-600">
-              This phase is our first ownership exercise: long-lived tray
-              callbacks own the values they capture, while helper functions borrow
-              shared app and window handles when they only need temporary access.
-            </p>
-          </article>
-        </section>
-      </div>
-    </main>
+          {result?.disclaimer && (
+            <p className="pt-2 text-xs leading-5 text-slate-400">{result.disclaimer}</p>
+          )}
+        </div>
+      </main>
+
+      {showSettings && settings && (
+        <SettingsModal settings={settings} onSave={handleSaveSettings} onClose={() => setShowSettings(false)} />
+      )}
+
+      {saveName !== null && (
+        <SaveDialog
+          name={saveName}
+          onChange={setSaveName}
+          onConfirm={confirmSave}
+          onCancel={() => setSaveName(null)}
+        />
+      )}
+    </div>
   );
 }
 
-export default App;
+function PromptBar({
+  value,
+  running,
+  onChange,
+  onSubmit,
+}: {
+  value: string;
+  running: boolean;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+}) {
+  return (
+    <div className="flex items-end gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm focus-within:border-sky-300">
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            onSubmit();
+          }
+        }}
+        rows={2}
+        placeholder="Where are the bottlenecks in…?"
+        className="flex-1 resize-none bg-transparent px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+      />
+      <button
+        onClick={onSubmit}
+        disabled={running || !value.trim()}
+        className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+      >
+        {running ? <IconSpinner /> : <IconSearch />}
+        {running ? "Researching" : "Search"}
+      </button>
+    </div>
+  );
+}
+
+function ResultsHeader({
+  result,
+  activeId,
+  running,
+  canSave,
+  onRerun,
+  onSave,
+}: {
+  result: ResearchResult | null;
+  activeId: number | null;
+  running: boolean;
+  canSave: boolean;
+  onRerun: () => void;
+  onSave: () => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white/80 p-5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <IconSparkles className="h-5 w-5 text-sky-600" />
+          <h2 className="text-lg font-semibold capitalize">{result?.industry || "Research"}</h2>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          {activeId != null && (
+            <button
+              onClick={onRerun}
+              disabled={running}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+            >
+              <IconRefresh className="h-3.5 w-3.5" /> Re-run
+            </button>
+          )}
+          {activeId == null && canSave && (
+            <button
+              onClick={onSave}
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+            >
+              Save watchlist
+            </button>
+          )}
+        </div>
+      </div>
+      {result?.summary && <p className="mt-2 text-sm leading-6 text-slate-600">{result.summary}</p>}
+    </div>
+  );
+}
+
+function SaveDialog({
+  name,
+  onChange,
+  onConfirm,
+  onCancel,
+}: {
+  name: string;
+  onChange: (v: string) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={onCancel}>
+      <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-bold">Save watchlist</h2>
+        <p className="mt-1 text-sm text-slate-500">Name this search so you can re-run it later.</p>
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && onConfirm()}
+          placeholder="e.g. AI data-center bottlenecks"
+          className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none"
+        />
+        <div className="mt-5 flex justify-end gap-2">
+          <button onClick={onCancel} className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+            Cancel
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={!name.trim()}
+            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

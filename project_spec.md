@@ -1,53 +1,99 @@
 # Project Specification: TrendWave
 
-## 1. Project Overview & Philosophy
-TrendWave is a background-first, cross-platform desktop application built to detect early stock momentum (volume spikes, unusual activity) in specific tech micro-sectors (e.g., photonics, solid-state batteries). 
-- **The Core Philosophy:** The app should be invisible 99% of the time, sipping minimal system resources, and only surface when a distinct data anomaly is detected.
-- **Pedagogical Goal:** This project is being built to learn **Rust**. The AI assistant must act as a senior Rust developer mentoring a junior developer, explaining *why* decisions are made regarding memory, ownership, and async patterns.
+## 1. Overview & philosophy
+TrendWave is a **local-first, prompt-first** desktop research tool for finding cheap, under-followed
+stocks that are exposed to **supply-chain / capacity bottlenecks** in a given industry.
 
-## 2. Tech Stack & Libraries
-- **App Framework:** Tauri v2
-- **Backend (Core Logic):** Rust
-  - `tokio`: Async runtime for background polling.
-  - `reqwest`: For making HTTP calls to financial APIs.
-  - `rusqlite`: For local SQLite database operations.
-  - `serde` & `serde_json`: For parsing API data and IPC payload serialization.
-  - `tauri-plugin-sql`: (Optional, but prefer raw `rusqlite` for learning Rust DB management).
-- **Frontend (Dashboard):** React, TypeScript, Tailwind CSS, Lucide Icons.
-- **Data Source:** Free tier APIs (e.g., `yfinance` unofficial endpoints, or Alpaca free tier).
+- **Bottleneck-first:** the primary signal is *where the chokepoints are* — scarce components,
+  limited production capacity, single-source suppliers, permitting/logistics constraints — not
+  generic momentum or news volume.
+- **Local & free:** all reasoning runs on the user's machine via Ollama. No API keys, no per-token
+  cost. The only network calls are to free public price/news endpoints and the local Ollama server.
+- **Prompt-first, calm UX:** one window. Ask a question, watch progress stream, get a ranked
+  shortlist. No always-on daemon, no noisy dashboard.
 
-## 3. Architecture & Data Flow
-The application is strictly separated into a Rust backend and a React frontend, communicating exclusively via Tauri's IPC (Inter-Process Communication) commands.
+> Not financial advice. Output is heuristic and must be verified against sources.
 
-### Phase 1: The Headless Foundation
-- App launches without a standard window.
-- Initializes a macOS Menu Bar / Windows System Tray icon.
-- Tray menu options: "Open Dashboard", "Pause Scanning", "Settings", "Quit".
+## 2. Tech stack
+- **App framework:** Tauri v2
+- **Backend (Rust):** `tokio` (async pipeline), `reqwest` (HTTP, rustls), `rusqlite` (SQLite,
+  bundled), `feed-rs` (RSS parsing), `serde`/`serde_json`, `thiserror` (typed errors), `chrono`.
+- **Intelligence:** local Ollama (`/api/chat` with `format: "json"`), default model `llama3.1:8b`.
+- **Frontend:** React, TypeScript, Tailwind CSS, Vite.
+- **Data sources (free, no key):** Yahoo Finance chart endpoint (prices/volume), Yahoo Finance
+  search endpoint (name → ticker), Yahoo Finance RSS (headlines).
 
-### Phase 2: State & Storage (The SQLite Brain)
-- Initialize a local `trendwave.db` file in the user's app data directory.
-- **Schema Requirements:**
-  - `tickers`: id, symbol, micro_sector, is_active.
-  - `daily_metrics`: id, ticker_id, date, volume, close_price.
-  - `alerts`: id, ticker_id, timestamp, trigger_reason, is_read.
-- **State Management:** Use Tauri's managed state (`tauri::State`) combined with a `Mutex` or `RwLock` to share the database connection pool across background threads and IPC commands safely.
+## 3. Architecture & data flow
+A Rust backend and a React frontend communicate exclusively over Tauri IPC. Long-running research is
+an async pipeline that streams progress to the UI over a Tauri `Channel`.
 
-### Phase 3: The Background Worker (Tokio)
-- A spawned `tokio` task that runs an infinite loop.
-- **Interval:** Wakes up every 15 minutes during market hours.
-- **Action:** Iterates through active tickers, fetches current volume/price via `reqwest`, and compares it to a 10-day moving average stored in SQLite.
-- **Trigger:** If volume > 300% of average, insert an `alert` into the DB and trigger a native OS notification.
+```
+prompt ─▶ run_research (command)
+            │  load settings, ensure Ollama ready
+            ▼
+        research::run_research
+            ├─ identify bottlenecks + candidate companies   (Ollama, JSON)
+            ├─ resolve + price each ticker                  (free feeds, concurrent)
+            ├─ filter to genuinely cheap names
+            ├─ fetch news + score sentiment                 (RSS + Ollama)
+            └─ bottleneck-weighted scoring + ranking
+            ▼
+        ResearchResult ─▶ frontend (streamed events + final payload)
+```
 
-### Phase 4: The Frontend Dashboard
-- Opened via the Tray Icon.
-- **UI Components:**
-  1. **Sector Heatmap:** A visual representation of micro-sectors showing aggregate volume momentum.
-  2. **Alert Feed:** A chronological list of triggered alerts.
-  3. **Settings:** Input fields for API keys and polling intervals.
-- Fetches data by invoking Tauri commands (e.g., `invoke('get_recent_alerts')`).
+### Backend modules
+- `commands.rs` — Tauri commands and shared `AppState` (`Mutex<Connection>` + `reqwest::Client`).
+  The DB lock is only held for short synchronous queries, never across `.await`.
+- `research.rs` — the pipeline and the pure, unit-tested `score_candidate` function.
+- `ollama.rs` — minimal local Ollama client: `ensure_ready` (health + model check) and
+  `generate_json` (typed, validated output).
+- `feeds.rs` — `fetch_price`, `resolve_symbol`, `fetch_news`.
+- `db.rs` — schema + CRUD for settings and watchlists (with cached last result).
+- `model.rs` — shared serializable types (`Bottleneck`, `Candidate`, `ResearchResult`,
+  `ProgressEvent`).
+- `settings.rs` — user settings with defaults.
+- `error.rs` — `AppError` enum, serialized to the frontend as `{ kind, message }`.
 
-## 4. Strict AI & Coding Guidelines
-1. **Explain the Borrow Checker:** When writing functions that pass strings, database connections, or state, explicitly comment on why you used `.clone()`, references (`&`), or `Arc<Mutex<T>>`.
-2. **Error Handling:** DO NOT use `.unwrap()` in production code. Use the `?` operator and create custom Rust Error enums (`thiserror` crate is permitted) that can be serialized to the frontend.
-3. **Pacing:** Never write more than one Phase or feature at a time. Await explicit user approval before moving to the next step.
-4. **Idiomatic Rust:** Prefer pattern matching (`match`, `if let`) over deeply nested conditionals.
+### Scoring
+Composite score in `0..100`, intentionally **bottleneck-dominant**:
+
+```
+score = 50 * (severity / 5)          // bottleneck exposure — the point of the app
+      + 20 * cheapness                // cheaper relative to the price cap
+      + 20 * ((sentiment + 1) / 2)    // news sentiment, neutral when unknown
+      + 10 * momentum                 // recent price change, clamped
+```
+
+### Commands (IPC)
+- `run_research(prompt, on_event)` → streams `ProgressEvent`s, returns `ResearchResult`.
+- `run_watchlist(id, on_event)` → re-runs a saved prompt and caches the result.
+- `get_settings` / `save_settings`.
+- `list_watchlists` / `create_watchlist` / `delete_watchlist`.
+
+### Persistence
+Local SQLite (`trendwave.db` in the OS app-data dir):
+- `settings` — single JSON row.
+- `watchlists` — id, name, prompt, cached `last_result`, `last_run_at`, `created_at`.
+
+### Frontend
+A single prompt window: prompt bar, streaming progress log, identified-bottleneck cards, ranked
+candidate cards (ticker, price, why-cheap, bottleneck thesis, upside, sentiment, news links), a
+saved-watchlist sidebar, and a settings modal. Types in `src/types.ts` mirror the Rust models.
+
+## 4. Coding guidelines
+1. **Typed errors, no panics:** no `.unwrap()` / `.expect()` on fallible paths in production code;
+   use `?` and `AppError`. The DB mutex is locked only for short synchronous spans.
+2. **Keep the model honest:** constrain LLM output to JSON and deserialize into typed structs;
+   always surface sources so the user can verify a thesis.
+3. **Local-first:** never introduce a paid API or send user prompts to a third party. Outbound calls
+   are limited to free public price/news endpoints and the local Ollama server.
+4. **Idiomatic Rust:** prefer pattern matching and small, testable pure functions (e.g. scoring) so
+   logic can be tested without the network.
+
+## 5. Status
+- [x] Prompt-first window with streaming research
+- [x] Local Ollama reasoning (bottlenecks, sentiment)
+- [x] Free price + news feeds
+- [x] Bottleneck-weighted ranking
+- [x] SQLite persistence + saved watchlists
+- [x] Settings (model, thresholds, toggles)
