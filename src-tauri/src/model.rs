@@ -34,22 +34,29 @@ pub struct PriceData {
     pub avg_volume: f64,
 }
 
-/// A ranked result card: a cheap stock exposed to a bottleneck, with the full
-/// thesis the UI renders (price, why-cheap, bottleneck link, upside, sentiment).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A ranked result card: a company best positioned to solve or monopolize a
+/// bottleneck, with the thesis the UI renders (positioning/moat, upside,
+/// bottleneck link, sentiment). Price is shown as context, never a filter.
+/// `#[serde(default)]` keeps older saved watchlist results loadable as fields evolve.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Candidate {
     pub ticker: String,
     pub company: String,
     pub price: Option<PriceData>,
-    /// Which bottleneck (by title) this company is exposed to.
+    /// Which bottleneck (by title) this company is positioned to win.
     pub bottleneck: String,
-    pub bottleneck_thesis: String,
-    pub why_cheap: String,
+    /// Why this company is best positioned to solve or monopolize the bottleneck.
+    pub thesis: String,
+    /// 1-5: how dominant / monopoly-like the company's position is (5 = near-monopoly).
+    pub moat: u8,
+    /// 1-5: potential share-price upside (5 = highest).
+    pub upside: u8,
     pub upside_rationale: String,
     /// Aggregate news sentiment in -1.0 .. 1.0, `None` if news disabled/empty.
     pub sentiment: Option<f64>,
     pub news: Vec<NewsItem>,
-    /// Composite 0-100 score used for ranking (bottleneck-weighted).
+    /// Composite 0-100 score used for ranking (positioning + upside weighted).
     pub score: f64,
 }
 
