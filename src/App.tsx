@@ -11,7 +11,9 @@ import {
   IconSpinner,
   ProgressLog,
   SettingsModal,
+  UpdateBanner,
   WatchlistSidebar,
+  type UpdatePhase,
 } from "./components";
 import type {
   AppErrorShape,
@@ -22,6 +24,7 @@ import type {
   Settings,
   Watchlist,
 } from "./types";
+import { checkForUpdate, downloadAndInstall, relaunch, Update } from "./updater";
 
 const EXAMPLES = [
   "Where are the bottlenecks in the AI data-center buildout?",
@@ -44,10 +47,30 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [saveName, setSaveName] = useState<string | null>(null);
 
+  const [update, setUpdate] = useState<Update | null>(null);
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase | null>(null);
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateToast, setUpdateToast] = useState<string | null>(null);
+
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
     refreshWatchlists();
+    // Silent check on launch; failures (e.g. running in dev) are ignored.
+    checkForUpdate()
+      .then((u) => {
+        if (u) {
+          setUpdate(u);
+          setUpdatePhase("available");
+        }
+      })
+      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!updateToast) return;
+    const t = setTimeout(() => setUpdateToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [updateToast]);
 
   const refreshWatchlists = () =>
     api.listWatchlists().then(setWatchlists).catch(() => {});
@@ -160,6 +183,41 @@ export default function App() {
     setShowSettings(false);
   };
 
+  const handleCheckUpdates = async () => {
+    if (updatePhase === "downloading") return;
+    setUpdateToast("Checking for updates…");
+    try {
+      const u = await checkForUpdate();
+      if (u) {
+        setUpdate(u);
+        setUpdatePhase("available");
+        setUpdateToast(null);
+      } else {
+        setUpdatePhase(null);
+        setUpdateToast("You're on the latest version.");
+      }
+    } catch (err) {
+      setUpdateToast(`Update check failed: ${String(err)}`);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!update) return;
+    setUpdateProgress(0);
+    setUpdatePhase("downloading");
+    try {
+      await downloadAndInstall(update, setUpdateProgress);
+      setUpdatePhase("ready");
+    } catch (err) {
+      setUpdateToast(`Update failed: ${String(err)}`);
+      setUpdatePhase("available");
+    }
+  };
+
+  const handleRestart = () => {
+    relaunch().catch(() => {});
+  };
+
   const hasResults = bottlenecks.length > 0 || candidates.length > 0;
 
   return (
@@ -171,10 +229,21 @@ export default function App() {
         onDelete={handleDelete}
         onNew={handleNew}
         onOpenSettings={() => setShowSettings(true)}
+        onCheckUpdates={handleCheckUpdates}
       />
 
       <main className="flex-1 overflow-y-auto">
         <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-8">
+          {updatePhase && update && (
+            <UpdateBanner
+              version={update.version}
+              phase={updatePhase}
+              progress={updateProgress}
+              onInstall={handleInstallUpdate}
+              onRestart={handleRestart}
+              onDismiss={() => setUpdatePhase(null)}
+            />
+          )}
           <header>
             <h1 className="text-2xl font-bold tracking-tight">Find the bottleneck. Find the stock.</h1>
             <p className="mt-1 text-sm text-slate-500">
@@ -259,6 +328,12 @@ export default function App() {
           onConfirm={confirmSave}
           onCancel={() => setSaveName(null)}
         />
+      )}
+
+      {updateToast && (
+        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-xs font-medium text-white shadow-lg">
+          {updateToast}
+        </div>
       )}
     </div>
   );
