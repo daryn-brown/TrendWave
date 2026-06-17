@@ -34,6 +34,30 @@ pub struct PriceData {
     pub avg_volume: f64,
 }
 
+/// Real growth fundamentals for a candidate, sourced from SEC EDGAR (reliable
+/// backbone) and opportunistically enriched by Yahoo. This is the *data* that
+/// replaces the model's invented upside guess when scoring for growth potential.
+/// All fields are optional so a candidate the feeds don't cover still renders.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GrowthData {
+    /// Latest year-over-year revenue growth as a fraction (0.13 = +13%).
+    pub revenue_growth_yoy: Option<f64>,
+    /// Revenue CAGR over the available annual window, as a fraction.
+    pub revenue_cagr: Option<f64>,
+    /// Latest year-over-year net-income growth as a fraction.
+    pub earnings_growth_yoy: Option<f64>,
+    /// Whether the most recent fiscal year was profitable.
+    pub profitable: Option<bool>,
+    /// Forward P/E (Yahoo enrichment; absent when Yahoo is unavailable).
+    pub forward_pe: Option<f64>,
+    /// Analyst mean-target implied upside vs. current price, as a fraction.
+    pub analyst_upside: Option<f64>,
+    /// Number of fiscal years the EDGAR series spans (context for CAGR).
+    pub years: Option<u32>,
+    /// Human-readable provenance, e.g. "SEC EDGAR" or "SEC EDGAR + Yahoo".
+    pub source: String,
+}
+
 /// A ranked result card: a company best positioned to solve or monopolize a
 /// bottleneck, with the thesis the UI renders (positioning/moat, upside,
 /// bottleneck link, sentiment). Price is shown as context, never a filter.
@@ -50,9 +74,15 @@ pub struct Candidate {
     pub thesis: String,
     /// 1-5: how dominant / monopoly-like the company's position is (5 = near-monopoly).
     pub moat: u8,
-    /// 1-5: potential share-price upside (5 = highest).
+    /// 1-5: the model's own upside guess. Retained for context, but no longer
+    /// drives ranking — `growth` + `growth_score` (real data) do.
     pub upside: u8,
     pub upside_rationale: String,
+    /// Real growth fundamentals, when the feeds cover this ticker.
+    pub growth: Option<GrowthData>,
+    /// 0..1 data-derived growth score actually used in ranking (neutral 0.5
+    /// when no fundamentals are available).
+    pub growth_score: f64,
     /// Aggregate news sentiment in -1.0 .. 1.0, `None` if news disabled/empty.
     pub sentiment: Option<f64>,
     pub news: Vec<NewsItem>,

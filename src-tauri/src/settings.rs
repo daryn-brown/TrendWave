@@ -14,6 +14,9 @@ pub struct Settings {
     pub max_results: u32,
     /// Pull recent news + run sentiment. Disabling speeds runs up considerably.
     pub use_news: bool,
+    /// Pull real fundamentals (SEC EDGAR + Yahoo) to drive the growth score.
+    /// Disabling falls back to the model's own upside guess and speeds runs up.
+    pub use_fundamentals: bool,
 }
 
 impl Default for Settings {
@@ -23,6 +26,7 @@ impl Default for Settings {
             model: "llama3.1:8b".to_string(),
             max_results: 8,
             use_news: true,
+            use_fundamentals: true,
         }
     }
 }
