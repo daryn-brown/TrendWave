@@ -1,11 +1,12 @@
 # TrendWave 📈🌊
 
-**Ask where an industry's bottlenecks are. Get cheap, under-the-radar stocks exposed to them.**
+**Ask where an industry's bottlenecks are. Get the stocks best positioned to solve or monopolize them.**
 
 TrendWave is a **local-first, prompt-first** desktop research tool. You type a question like
 *"Where are the bottlenecks in the AI data-center buildout?"* and it quietly does the legwork —
-identifies the real supply-chain chokepoints, finds smaller companies positioned to benefit, prices
-them, scans recent news for sentiment, and hands back a ranked shortlist with the full thesis.
+identifies the real supply-chain chokepoints, finds the public companies best positioned to solve or
+monopolize them, prices them for context, scans recent news for sentiment, and hands back a ranked
+shortlist with the full thesis.
 
 All the reasoning runs **on your machine** through [Ollama](https://ollama.com). No API keys, no
 per-token costs, no data leaving your laptop except public price/news lookups.
@@ -21,18 +22,18 @@ flowchart LR
     B --> C[Resolve tickers]
     C --> D[Price feeds<br/>Yahoo / free]
     D --> E[News + sentiment<br/>RSS + Ollama]
-    E --> F[Bottleneck-weighted<br/>ranking]
-    F --> G[Ranked cheap stocks]
+    E --> F[Positioning + upside<br/>ranking]
+    F --> G[Ranked stock picks]
 ```
 
 1. **Identify bottlenecks** — the local model reasons about current chokepoints (scarce components,
-   limited capacity, single-source suppliers, logistics constraints) and which cheaper public
-   companies are exposed to them.
-2. **Validate & price** — proposed tickers are checked against free price feeds; anything above your
-   price cap is dropped.
+   limited capacity, single-source suppliers, logistics constraints) and which public companies are
+   best positioned to solve or monopolize them.
+2. **Validate & price** — proposed tickers are checked against free price feeds and priced for
+   context. Price is never a filter — large caps are welcome if they're the dominant beneficiary.
 3. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
-4. **Rank** — a transparent score weights **bottleneck severity highest**, then cheapness,
-   sentiment, and momentum.
+4. **Rank** — a transparent score weights **competitive positioning (bottleneck severity + moat) and
+   upside highest**, with sentiment and momentum as tie-breakers.
 
 Progress streams live to the UI, and you can **save any search as a watchlist** to re-run with one
 click later.
@@ -87,9 +88,7 @@ Open **Settings** from the sidebar to tune:
 |---|---|---|
 | Ollama model | `llama3.1:8b` | Any locally installed model |
 | Ollama endpoint | `http://localhost:11434` | Where the local server listens |
-| Max price | `20` | "Cheap" ceiling — pricier names are filtered out |
-| Min score | `40` | Minimum composite score to surface a candidate |
-| Max results | `8` | Cap on returned candidates |
+| Max results | `8` | Cap on returned picks |
 | Scan news & sentiment | on | Pull headlines and score sentiment (slower) |
 
 Settings and watchlists persist in a local SQLite file (`trendwave.db`) in your OS app-data
