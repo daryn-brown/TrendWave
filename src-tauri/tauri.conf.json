@@ -33,6 +33,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/daryn-brown/TrendWave/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY4NUExN0E5MjJFQzY2MwpSV1JqeGk2U2VxR0ZEK0ZybFN3NDBiamJGeFdka0M5UFZ3UWh2cW5wT1pWNVkzYXh6RnhhSzgyMwo="
+    }
   }
 }
