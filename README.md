@@ -21,9 +21,10 @@ flowchart LR
     A[Your prompt] --> B[Identify bottlenecks<br/>Ollama]
     B --> C[Resolve tickers]
     C --> D[Price feeds<br/>Yahoo / free]
-    D --> E[News + sentiment<br/>RSS + Ollama]
-    E --> F[Positioning + upside<br/>ranking]
-    F --> G[Ranked stock picks]
+    D --> E[Growth research<br/>SEC EDGAR + Yahoo]
+    E --> F[News + sentiment<br/>RSS + Ollama]
+    F --> G[Growth + positioning<br/>ranking]
+    G --> H[Ranked stock picks]
 ```
 
 1. **Identify bottlenecks** — the local model reasons about current chokepoints (scarce components,
@@ -31,9 +32,14 @@ flowchart LR
    best positioned to solve or monopolize them.
 2. **Validate & price** — proposed tickers are checked against free price feeds and priced for
    context. Price is never a filter — large caps are welcome if they're the dominant beneficiary.
-3. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
-4. **Rank** — a transparent score weights **competitive positioning (bottleneck severity + moat) and
-   upside highest**, with sentiment and momentum as tie-breakers.
+3. **Research real growth** — for each ticker TrendWave pulls **audited fundamentals from SEC EDGAR**
+   (multi-year revenue & earnings → real YoY growth, CAGR, profitability), opportunistically enriched
+   with Yahoo forward P/E and analyst-target upside. This yields a **data-derived growth score** that
+   replaces the model's guesswork about upside.
+4. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
+5. **Rank** — a transparent score weights **real growth potential highest (35%)**, then competitive
+   positioning (bottleneck severity + moat), with sentiment and momentum as tie-breakers. Share price
+   is never a filter.
 
 Progress streams live to the UI, and you can **save any search as a watchlist** to re-run with one
 click later.
@@ -45,7 +51,8 @@ click later.
   `feed-rs` (RSS), `thiserror` (typed errors)
 - **Intelligence:** local Ollama model (default `llama3.1:8b`)
 - **Frontend:** React + TypeScript + Tailwind CSS, built with Vite
-- **Data:** free public endpoints (Yahoo Finance chart + RSS). No keys required.
+- **Data:** free public endpoints — Yahoo Finance (prices, search, RSS news; forward P/E & analyst
+  targets) and **SEC EDGAR** (audited fundamentals). No keys required.
 
 ## Getting started 🚀
 
@@ -90,6 +97,7 @@ Open **Settings** from the sidebar to tune:
 | Ollama endpoint | `http://localhost:11434` | Where the local server listens |
 | Max results | `8` | Cap on returned picks |
 | Scan news & sentiment | on | Pull headlines and score sentiment (slower) |
+| Research real growth | on | Pull SEC EDGAR + Yahoo fundamentals to drive the growth score (slower) |
 
 Settings and watchlists persist in a local SQLite file (`trendwave.db`) in your OS app-data
 directory.
@@ -109,7 +117,8 @@ TrendWave/
 │   ├── commands.rs      # Tauri IPC commands
 │   ├── research.rs      # The bottleneck → ranking pipeline
 │   ├── ollama.rs        # Local Ollama client
-│   ├── feeds.rs         # Free price + news feeds
+│   ├── feeds.rs         # Free price + news feeds (Yahoo)
+│   ├── fundamentals.rs  # Real growth research (SEC EDGAR + Yahoo enrichment)
 │   ├── db.rs            # SQLite persistence
 │   ├── model.rs         # Shared serializable types
 │   ├── settings.rs      # User settings
@@ -120,4 +129,6 @@ TrendWave/
 ## Privacy 🔒
 
 TrendWave is local-first by design. Your prompts and results never leave your machine. The only
-outbound network calls are to free, public price and news endpoints and to your local Ollama server.
+outbound network calls are to free, public endpoints — Yahoo Finance (prices & news) and SEC EDGAR
+(audited fundamentals) — and to your local Ollama server. SEC requests send a descriptive
+User-Agent with a contact address, per SEC's fair-access policy.
