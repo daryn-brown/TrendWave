@@ -248,7 +248,8 @@ export default function App() {
             <h1 className="text-2xl font-bold tracking-tight">Find the bottleneck. Find the stock.</h1>
             <p className="mt-1 text-sm text-slate-500">
               Ask about an industry. TrendWave finds the supply chokepoints, then the public companies
-              best positioned to solve or monopolize them — ranked by upside, all locally via Ollama.
+              best positioned to solve or monopolize them — ranked by real revenue &amp; earnings growth
+              (SEC EDGAR) and competitive positioning, reasoned locally via Ollama.
             </p>
           </header>
 

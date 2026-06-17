@@ -14,6 +14,17 @@ export interface PriceData {
   avg_volume: number;
 }
 
+export interface GrowthData {
+  revenue_growth_yoy?: number | null;
+  revenue_cagr?: number | null;
+  earnings_growth_yoy?: number | null;
+  profitable?: boolean | null;
+  forward_pe?: number | null;
+  analyst_upside?: number | null;
+  years?: number | null;
+  source: string;
+}
+
 export interface NewsItem {
   title: string;
   url: string;
@@ -29,8 +40,10 @@ export interface Candidate {
   bottleneck: string;
   thesis: string;
   moat: number; // 1..5
-  upside: number; // 1..5
+  upside: number; // 1..5 — model's own guess; no longer drives ranking
   upside_rationale: string;
+  growth?: GrowthData | null;
+  growth_score: number; // 0..1 data-derived score used in ranking
   sentiment?: number | null;
   news: NewsItem[];
   score: number;
@@ -56,6 +69,7 @@ export interface Settings {
   model: string;
   max_results: number;
   use_news: boolean;
+  use_fundamentals: boolean;
 }
 
 export interface Watchlist {

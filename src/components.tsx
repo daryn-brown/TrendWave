@@ -4,6 +4,7 @@ import type {
   AppErrorShape,
   Bottleneck,
   Candidate,
+  GrowthData,
   Settings,
   Watchlist,
 } from "./types";
@@ -75,6 +76,13 @@ export const formatPrice = (price: number, currency: string) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD" }).format(price);
 
 export const formatPct = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+
+// Growth metrics arrive as fractions (0.13 = +13%).
+export const formatGrowthPct = (frac: number) =>
+  `${frac >= 0 ? "+" : ""}${(frac * 100).toFixed(1)}%`;
+
+const growthTone = (frac: number) =>
+  frac > 0.001 ? "text-emerald-600" : frac < -0.001 ? "text-rose-600" : "text-slate-600";
 
 export const formatVolume = (v: number) => {
   if (v >= 1e9) return `${(v / 1e9).toFixed(1)}B`;
@@ -309,9 +317,21 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
         <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-100">
           Moat {candidate.moat}/5
         </span>
-        <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-100">
-          Upside {candidate.upside}/5
-        </span>
+        {candidate.growth?.revenue_growth_yoy != null ? (
+          <span
+            className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${
+              candidate.growth.revenue_growth_yoy >= 0
+                ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
+                : "bg-rose-50 text-rose-700 ring-rose-100"
+            }`}
+          >
+            Rev {formatGrowthPct(candidate.growth.revenue_growth_yoy)} YoY
+          </span>
+        ) : (
+          <span className="rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-slate-100">
+            Growth {Math.round(candidate.growth_score * 100)}
+          </span>
+        )}
         <span className={`text-xs font-medium ${senti.color}`}>● {senti.text}</span>
         {price && price.avg_volume > 0 && (
           <span className="text-xs text-slate-400">avg vol {formatVolume(price.avg_volume)}</span>
@@ -322,8 +342,16 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
         {candidate.thesis && (
           <Field label="Why it's positioned to win" value={candidate.thesis} />
         )}
-        {candidate.upside_rationale && <Field label="Upside" value={candidate.upside_rationale} />}
+        {candidate.upside_rationale && (
+          <Field label="Growth outlook (model view)" value={candidate.upside_rationale} />
+        )}
       </dl>
+
+      {candidate.growth ? (
+        <GrowthPanel growth={candidate.growth} />
+      ) : (
+        <p className="mt-3 text-xs text-slate-400">No growth fundamentals found for this ticker.</p>
+      )}
 
       {candidate.news.length > 0 && (
         <div className="mt-4 border-t border-slate-100 pt-3">
@@ -354,6 +382,62 @@ function Field({ label, value }: { label: string; value: string }) {
     <div>
       <dt className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">{label}</dt>
       <dd className="mt-0.5 text-sm leading-6 text-slate-700">{value}</dd>
+    </div>
+  );
+}
+
+function GrowthPanel({ growth }: { growth: GrowthData }) {
+  const stats: { label: string; value: string; tone: string }[] = [];
+  if (growth.revenue_growth_yoy != null)
+    stats.push({
+      label: "Revenue YoY",
+      value: formatGrowthPct(growth.revenue_growth_yoy),
+      tone: growthTone(growth.revenue_growth_yoy),
+    });
+  if (growth.revenue_cagr != null)
+    stats.push({
+      label: growth.years ? `Revenue CAGR · ${growth.years}y` : "Revenue CAGR",
+      value: formatGrowthPct(growth.revenue_cagr),
+      tone: growthTone(growth.revenue_cagr),
+    });
+  if (growth.earnings_growth_yoy != null)
+    stats.push({
+      label: "Earnings YoY",
+      value: formatGrowthPct(growth.earnings_growth_yoy),
+      tone: growthTone(growth.earnings_growth_yoy),
+    });
+  if (growth.profitable != null)
+    stats.push({
+      label: "Profitability",
+      value: growth.profitable ? "Profitable" : "Unprofitable",
+      tone: growth.profitable ? "text-emerald-600" : "text-rose-600",
+    });
+  if (growth.analyst_upside != null)
+    stats.push({
+      label: "Analyst target",
+      value: formatGrowthPct(growth.analyst_upside),
+      tone: growthTone(growth.analyst_upside),
+    });
+  if (growth.forward_pe != null)
+    stats.push({ label: "Forward P/E", value: growth.forward_pe.toFixed(1), tone: "text-slate-700" });
+
+  if (stats.length === 0) return null;
+  return (
+    <div className="mt-4 rounded-2xl bg-slate-50 p-3 ring-1 ring-slate-100">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+          Growth research
+        </span>
+        {growth.source && <span className="text-[10px] text-slate-400">via {growth.source}</span>}
+      </div>
+      <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-3">
+        {stats.map((s) => (
+          <div key={s.label}>
+            <dt className="text-[10px] uppercase tracking-wide text-slate-400">{s.label}</dt>
+            <dd className={`text-sm font-semibold ${s.tone}`}>{s.value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }
@@ -471,6 +555,10 @@ export function SettingsModal({
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input type="checkbox" checked={form.use_news} onChange={(e) => update("use_news", e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
             Scan news & compute sentiment (slower)
+          </label>
+          <label className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={form.use_fundamentals} onChange={(e) => update("use_fundamentals", e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
+            Research real growth (SEC EDGAR + Yahoo) to rank picks
           </label>
         </div>
 

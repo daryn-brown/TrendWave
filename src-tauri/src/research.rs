@@ -1,7 +1,10 @@
 use serde::Deserialize;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::error::AppResult;
 use crate::feeds;
+use crate::fundamentals::{self, YahooEnrich};
 use crate::model::{Bottleneck, Candidate, ProgressEvent, ResearchResult, DISCLAIMER};
 use crate::ollama::OllamaClient;
 use crate::settings::Settings;
@@ -28,11 +31,13 @@ const SYSTEM_SENTIMENT: &str = "\
 You judge market sentiment from news headlines about one company. Respond with STRICT JSON \
 only: {\"score\":number} where score is between -1 (very bearish) and 1 (very bullish).";
 
-// Scoring weights — positioning to win the bottleneck (severity + moat) plus
-// upside dominate; sentiment and momentum only refine. Price is never scored.
-const W_BOTTLENECK: f64 = 30.0;
-const W_MOAT: f64 = 30.0;
-const W_UPSIDE: f64 = 25.0;
+// Scoring weights — positioning to win the bottleneck (severity + moat) and
+// real growth potential dominate; sentiment and momentum only refine. Growth is
+// the single largest factor and comes from audited data, not the model's guess.
+// Share price is never scored.
+const W_BOTTLENECK: f64 = 25.0;
+const W_MOAT: f64 = 25.0;
+const W_GROWTH: f64 = 35.0;
 const W_SENTIMENT: f64 = 10.0;
 const W_MOMENTUM: f64 = 5.0;
 
@@ -76,18 +81,19 @@ struct Working {
 }
 
 /// Pure, deterministic scoring so it can be unit-tested without any network.
-/// Positioning to win the bottleneck (severity + moat) and upside dominate;
-/// sentiment and momentum refine. Share price is deliberately NOT a factor.
+/// Positioning to win the bottleneck (severity + moat) and real growth dominate;
+/// sentiment and momentum refine. `growth` is a 0..1 data-derived score (see
+/// `fundamentals::growth_score`). Share price is deliberately NOT a factor.
 pub fn score_candidate(
     severity: u8,
     moat: u8,
-    upside: u8,
+    growth: f64,
     sentiment: Option<f64>,
     change_pct: f64,
 ) -> f64 {
     let sev = (severity.clamp(1, 5) as f64) / 5.0;
     let moat_n = (moat.clamp(1, 5) as f64) / 5.0;
-    let up = (upside.clamp(1, 5) as f64) / 5.0;
+    let growth_n = growth.clamp(0.0, 1.0);
 
     // Map -1..1 sentiment onto 0..1; unknown sentiment sits neutral.
     let senti = ((sentiment.unwrap_or(0.0).clamp(-1.0, 1.0)) + 1.0) / 2.0;
@@ -95,7 +101,7 @@ pub fn score_candidate(
     // +20% over the window → full marks, -20% → zero, clamped.
     let momentum = (0.5 + change_pct / 40.0).clamp(0.0, 1.0);
 
-    W_BOTTLENECK * sev + W_MOAT * moat_n + W_UPSIDE * up + W_SENTIMENT * senti + W_MOMENTUM * momentum
+    W_BOTTLENECK * sev + W_MOAT * moat_n + W_GROWTH * growth_n + W_SENTIMENT * senti + W_MOMENTUM * momentum
 }
 
 fn normalize_ticker(raw: &str) -> String {
@@ -172,6 +178,8 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                     moat: c.moat.unwrap_or(3).clamp(1, 5),
                     upside: c.upside.unwrap_or(3).clamp(1, 5),
                     upside_rationale: c.upside_rationale.clone().unwrap_or_default(),
+                    growth: None,
+                    growth_score: 0.0,
                     sentiment: None,
                     news: Vec::new(),
                     score: 0.0,
@@ -220,6 +228,36 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     // surfaced otherwise gets recommended (the user always wants picks back).
     working.retain(|w| !w.candidate.ticker.is_empty());
 
+    // Real growth research: pull audited fundamentals from SEC EDGAR (with
+    // opportunistic Yahoo enrichment) concurrently but politely. This is what
+    // actually drives the growth term in scoring — not the model's guess.
+    if settings.use_fundamentals {
+        emit(ProgressEvent::Stage {
+            stage: "growth".into(),
+            message: "Researching revenue & earnings growth…".into(),
+        });
+        let yahoo = YahooEnrich::init().await;
+        let limit = Arc::new(Semaphore::new(4));
+        let mut set = tokio::task::JoinSet::new();
+        for (idx, w) in working.iter().enumerate() {
+            let http = http.clone();
+            let ticker = w.candidate.ticker.clone();
+            let price = w.candidate.price.as_ref().map(|p| p.price);
+            let yahoo = yahoo.clone();
+            let limit = limit.clone();
+            set.spawn(async move {
+                let _permit = limit.acquire_owned().await.ok();
+                let growth = fundamentals::fetch_growth(&http, &ticker, yahoo.as_ref(), price).await;
+                (idx, growth)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            if let Ok((idx, growth)) = joined {
+                working[idx].candidate.growth = growth;
+            }
+        }
+    }
+
     // News + sentiment for the survivors.
     if settings.use_news {
         emit(ProgressEvent::Stage {
@@ -242,13 +280,25 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     // Score, rank, trim.
     emit(ProgressEvent::Stage {
         stage: "ranking".into(),
-        message: "Ranking by positioning & upside…".into(),
+        message: "Ranking by growth & positioning…".into(),
     });
     for w in working.iter_mut() {
+        // Real fundamentals drive the growth term; fall back to the model's
+        // upside only when the user has turned fundamentals off.
+        let growth = if settings.use_fundamentals {
+            w.candidate
+                .growth
+                .as_ref()
+                .map(fundamentals::growth_score)
+                .unwrap_or(0.5)
+        } else {
+            (w.candidate.upside.clamp(1, 5) as f64) / 5.0
+        };
+        w.candidate.growth_score = growth;
         w.candidate.score = score_candidate(
             w.severity,
             w.candidate.moat,
-            w.candidate.upside,
+            growth,
             w.candidate.sentiment,
             w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
         );
@@ -304,22 +354,22 @@ mod tests {
 
     #[test]
     fn severe_bottleneck_outscores_mild_one() {
-        let severe = score_candidate(5, 3, 3, Some(0.5), 5.0);
-        let mild = score_candidate(1, 3, 3, Some(0.5), 5.0);
+        let severe = score_candidate(5, 3, 0.6, Some(0.5), 5.0);
+        let mild = score_candidate(1, 3, 0.6, Some(0.5), 5.0);
         assert!(severe > mild);
     }
 
     #[test]
     fn stronger_moat_scores_higher_all_else_equal() {
-        let monopoly = score_candidate(3, 5, 3, None, 0.0);
-        let commodity = score_candidate(3, 1, 3, None, 0.0);
+        let monopoly = score_candidate(3, 5, 0.6, None, 0.0);
+        let commodity = score_candidate(3, 1, 0.6, None, 0.0);
         assert!(monopoly > commodity);
     }
 
     #[test]
-    fn higher_upside_scores_higher_all_else_equal() {
-        let big = score_candidate(3, 3, 5, None, 0.0);
-        let small = score_candidate(3, 3, 1, None, 0.0);
+    fn higher_growth_scores_higher_all_else_equal() {
+        let big = score_candidate(3, 3, 1.0, None, 0.0);
+        let small = score_candidate(3, 3, 0.0, None, 0.0);
         assert!(big > small);
     }
 
@@ -327,15 +377,15 @@ mod tests {
     fn positioning_dominates_sentiment() {
         // A severe bottleneck with bad sentiment should still beat a mild
         // bottleneck with great sentiment — positioning is the point.
-        let severe_bad_news = score_candidate(5, 3, 3, Some(-1.0), 0.0);
-        let mild_great_news = score_candidate(1, 3, 3, Some(1.0), 0.0);
+        let severe_bad_news = score_candidate(5, 3, 0.6, Some(-1.0), 0.0);
+        let mild_great_news = score_candidate(1, 3, 0.6, Some(1.0), 0.0);
         assert!(severe_bad_news > mild_great_news);
     }
 
     #[test]
     fn score_stays_within_bounds() {
-        let max = score_candidate(5, 5, 5, Some(1.0), 100.0);
-        let min = score_candidate(1, 1, 1, Some(-1.0), -100.0);
+        let max = score_candidate(5, 5, 1.0, Some(1.0), 100.0);
+        let min = score_candidate(1, 1, 0.0, Some(-1.0), -100.0);
         assert!(max <= 100.0 + f64::EPSILON);
         assert!(min >= 0.0 - f64::EPSILON);
     }

@@ -2,6 +2,7 @@ mod commands;
 mod db;
 mod error;
 mod feeds;
+mod fundamentals;
 mod model;
 mod ollama;
 mod research;
