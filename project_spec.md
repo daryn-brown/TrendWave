@@ -1,8 +1,8 @@
 # Project Specification: TrendWave
 
 ## 1. Overview & philosophy
-TrendWave is a **local-first, prompt-first** desktop research tool for finding cheap, under-followed
-stocks that are exposed to **supply-chain / capacity bottlenecks** in a given industry.
+TrendWave is a **local-first, prompt-first** desktop research tool for finding the public companies
+best positioned to solve or monopolize **supply-chain / capacity bottlenecks** in a given industry.
 
 - **Bottleneck-first:** the primary signal is *where the chokepoints are* — scarce components,
   limited production capacity, single-source suppliers, permitting/logistics constraints — not
@@ -32,11 +32,11 @@ prompt ─▶ run_research (command)
             │  load settings, ensure Ollama ready
             ▼
         research::run_research
-            ├─ identify bottlenecks + candidate companies   (Ollama, JSON)
+            ├─ identify bottlenecks + companies positioned to win  (Ollama, JSON)
             ├─ resolve + price each ticker                  (free feeds, concurrent)
-            ├─ filter to genuinely cheap names
+            ├─ keep every named pick (price is context, not a filter)
             ├─ fetch news + score sentiment                 (RSS + Ollama)
-            └─ bottleneck-weighted scoring + ranking
+            └─ positioning + upside scoring + ranking
             ▼
         ResearchResult ─▶ frontend (streamed events + final payload)
 ```
@@ -55,13 +55,15 @@ prompt ─▶ run_research (command)
 - `error.rs` — `AppError` enum, serialized to the frontend as `{ kind, message }`.
 
 ### Scoring
-Composite score in `0..100`, intentionally **bottleneck-dominant**:
+Composite score in `0..100`, driven by **competitive positioning and upside** (share price is never
+a factor):
 
 ```
-score = 50 * (severity / 5)          // bottleneck exposure — the point of the app
-      + 20 * cheapness                // cheaper relative to the price cap
-      + 20 * ((sentiment + 1) / 2)    // news sentiment, neutral when unknown
-      + 10 * momentum                 // recent price change, clamped
+score = 30 * (severity / 5)          // how acute the bottleneck is
+      + 30 * (moat / 5)              // how dominant / monopoly-like the position is
+      + 25 * (upside / 5)            // model-rated share-price upside
+      + 10 * ((sentiment + 1) / 2)   // news sentiment, neutral when unknown
+      +  5 * momentum                // recent price change, clamped
 ```
 
 ### Commands (IPC)
@@ -77,8 +79,8 @@ Local SQLite (`trendwave.db` in the OS app-data dir):
 
 ### Frontend
 A single prompt window: prompt bar, streaming progress log, identified-bottleneck cards, ranked
-candidate cards (ticker, price, why-cheap, bottleneck thesis, upside, sentiment, news links), a
-saved-watchlist sidebar, and a settings modal. Types in `src/types.ts` mirror the Rust models.
+pick cards (ticker, price for context, positioning thesis, moat & upside ratings, sentiment, news
+links), a saved-watchlist sidebar, and a settings modal. Types in `src/types.ts` mirror the Rust models.
 
 ## 4. Coding guidelines
 1. **Typed errors, no panics:** no `.unwrap()` / `.expect()` on fallible paths in production code;
