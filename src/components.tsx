@@ -64,6 +64,11 @@ export const IconRefresh = ({ className = base }: IconProps) => (
     <path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5" />
   </svg>
 );
+export const IconDownload = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+  </svg>
+);
 
 // ---- Formatting helpers -----------------------------------------------------
 
@@ -129,6 +134,82 @@ export function ErrorBanner({ error, onDismiss }: { error: AppErrorShape; onDism
           <IconClose />
         </button>
       </div>
+    </div>
+  );
+}
+
+// ---- Update banner ----------------------------------------------------------
+
+export type UpdatePhase = "available" | "downloading" | "ready";
+
+export function UpdateBanner({
+  version,
+  phase,
+  progress,
+  onInstall,
+  onRestart,
+  onDismiss,
+}: {
+  version: string;
+  phase: UpdatePhase;
+  progress: number;
+  onInstall: () => void;
+  onRestart: () => void;
+  onDismiss: () => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5">
+          <IconDownload className="h-5 w-5 shrink-0 text-sky-600" />
+          <div>
+            <p className="text-sm font-semibold text-sky-900">
+              {phase === "ready" ? `Update ready — v${version}` : `Update available — v${version}`}
+            </p>
+            <p className="text-xs text-sky-700">
+              {phase === "available" && "A newer version of TrendWave is ready to install."}
+              {phase === "downloading" && `Downloading… ${progress}%`}
+              {phase === "ready" && "Restart to start using the new version."}
+            </p>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {phase === "available" && (
+            <>
+              <button
+                onClick={onInstall}
+                className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700"
+              >
+                Download &amp; install
+              </button>
+              <button
+                onClick={onDismiss}
+                className="rounded-lg px-2 py-1.5 text-sky-700 hover:bg-sky-100"
+                title="Dismiss"
+              >
+                <IconClose className="h-3.5 w-3.5" />
+              </button>
+            </>
+          )}
+          {phase === "downloading" && <IconSpinner className="h-4 w-4 text-sky-600" />}
+          {phase === "ready" && (
+            <button
+              onClick={onRestart}
+              className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700"
+            >
+              Restart now
+            </button>
+          )}
+        </div>
+      </div>
+      {phase === "downloading" && (
+        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+          <div
+            className="h-full rounded-full bg-sky-500 transition-all"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -370,6 +451,7 @@ export function WatchlistSidebar({
   onDelete,
   onNew,
   onOpenSettings,
+  onCheckUpdates,
 }: {
   watchlists: Watchlist[];
   activeId: number | null;
@@ -377,6 +459,7 @@ export function WatchlistSidebar({
   onDelete: (id: number) => void;
   onNew: () => void;
   onOpenSettings: () => void;
+  onCheckUpdates: () => void;
 }) {
   return (
     <aside className="flex w-64 shrink-0 flex-col gap-3 border-r border-slate-200 bg-white/60 p-4">
@@ -422,12 +505,20 @@ export function WatchlistSidebar({
         ))}
       </div>
 
-      <button
-        onClick={onOpenSettings}
-        className="flex items-center gap-2 rounded-xl px-2 py-2 text-sm text-slate-500 hover:bg-slate-100 hover:text-slate-800"
-      >
-        <IconSettings /> Settings
-      </button>
+      <div className="space-y-1">
+        <button
+          onClick={onCheckUpdates}
+          className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-sm text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+        >
+          <IconDownload /> Check for updates
+        </button>
+        <button
+          onClick={onOpenSettings}
+          className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-sm text-slate-500 hover:bg-slate-100 hover:text-slate-800"
+        >
+          <IconSettings /> Settings
+        </button>
+      </div>
     </aside>
   );
 }

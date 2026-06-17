@@ -1,0 +1,65 @@
+name: release
+
+# Build and publish a signed, auto-updatable macOS app every time main changes
+# (i.e. when a PR is merged). The running app checks the latest release for a
+# newer signed bundle and updates itself in place.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# One release at a time; newer pushes cancel an in-flight build.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Each merge to main gets an incrementing version so the updater can tell
+      # an installed build it is out of date. No version bump is committed.
+      - name: Set version from run number
+        id: ver
+        run: |
+          VERSION="0.1.${{ github.run_number }}"
+          node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          node -e "const fs=require('fs');const p='package.json';const c=JSON.parse(fs.readFileSync(p));c.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build, sign and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: app-v${{ steps.ver.outputs.version }}
+          releaseName: TrendWave v${{ steps.ver.outputs.version }}
+          releaseBody: Automated build from the latest commit on main.
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          # Universal binary so the release runs on both Apple Silicon and Intel Macs.
+          args: --target universal-apple-darwin
