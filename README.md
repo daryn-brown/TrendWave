@@ -1,135 +1,124 @@
 # TrendWave 📈🌊
 
-TrendWave is a background-first desktop app for spotting early stock momentum in niche tech sectors before the crowd catches on.
+**Ask where an industry's bottlenecks are. Get cheap, under-the-radar stocks exposed to them.**
 
-Built with **Tauri v2 + Rust + React + TypeScript + Tailwind CSS**, this project is also a guided Rust learning journey focused on ownership, borrowing, error handling, and async design.
+TrendWave is a **local-first, prompt-first** desktop research tool. You type a question like
+*"Where are the bottlenecks in the AI data-center buildout?"* and it quietly does the legwork —
+identifies the real supply-chain chokepoints, finds smaller companies positioned to benefit, prices
+them, scans recent news for sentiment, and hands back a ranked shortlist with the full thesis.
 
-## Why This Exists ✨
+All the reasoning runs **on your machine** through [Ollama](https://ollama.com). No API keys, no
+per-token costs, no data leaving your laptop except public price/news lookups.
 
-Most market tools are noisy dashboards. TrendWave is aiming for the opposite:
+> ⚠️ **Not financial advice.** TrendWave is a research aid. Its signals are heuristic and can be
+> wrong. Verify every thesis against the linked sources before making any decision.
 
-- Stay invisible most of the time
-- Use minimal system resources
-- Watch for unusual volume and momentum signals in targeted micro-sectors
-- Surface only when something genuinely interesting happens
+## How it works 🧠
 
-## Current Status 🚧
+```mermaid
+flowchart LR
+    A[Your prompt] --> B[Identify bottlenecks<br/>Ollama]
+    B --> C[Resolve tickers]
+    C --> D[Price feeds<br/>Yahoo / free]
+    D --> E[News + sentiment<br/>RSS + Ollama]
+    E --> F[Bottleneck-weighted<br/>ranking]
+    F --> G[Ranked cheap stocks]
+```
 
-The app scaffold is up and running.
+1. **Identify bottlenecks** — the local model reasons about current chokepoints (scarce components,
+   limited capacity, single-source suppliers, logistics constraints) and which cheaper public
+   companies are exposed to them.
+2. **Validate & price** — proposed tickers are checked against free price feeds; anything above your
+   price cap is dropped.
+3. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
+4. **Rank** — a transparent score weights **bottleneck severity highest**, then cheapness,
+   sentiment, and momentum.
 
-- [x] Tauri + React + TypeScript project initialized
-- [x] Tailwind CSS wired into Vite
-- [x] Rust-to-frontend IPC verified with the starter `greet` command
-- [ ] Phase 1: Headless tray-first foundation
-- [ ] Phase 2: SQLite-backed state and storage
-- [ ] Phase 3: Tokio background worker and alerts
-- [ ] Phase 4: Dashboard UI
+Progress streams live to the UI, and you can **save any search as a watchlist** to re-run with one
+click later.
 
-## Architecture Roadmap 🧭
+## Tech stack 🛠️
 
-### Phase 1: Headless Foundation
-- Launch without a standard window
-- Add a macOS menu bar / Windows tray icon
-- Support tray actions for dashboard, pause, settings, and quit
+- **Shell:** Tauri v2 (Rust core + web frontend)
+- **Backend:** Rust — `tokio` (async pipeline), `reqwest` (HTTP), `rusqlite` (local SQLite),
+  `feed-rs` (RSS), `thiserror` (typed errors)
+- **Intelligence:** local Ollama model (default `llama3.1:8b`)
+- **Frontend:** React + TypeScript + Tailwind CSS, built with Vite
+- **Data:** free public endpoints (Yahoo Finance chart + RSS). No keys required.
 
-### Phase 2: State & Storage
-- Create a local `trendwave.db`
-- Store tracked tickers, daily metrics, and generated alerts
-- Share state safely with Tauri managed state and Rust synchronization primitives
-
-### Phase 3: Background Worker
-- Run a periodic Tokio task during market hours
-- Fetch price and volume data from external APIs
-- Compare current activity against moving averages
-- Trigger alerts and native notifications when thresholds are crossed
-
-### Phase 4: Dashboard
-- Show a sector heatmap
-- Show a recent alert feed
-- Add settings for API keys and polling intervals
-- Read backend data through Tauri IPC commands
-
-## Tech Stack 🛠️
-
-- **Desktop shell:** Tauri v2
-- **Backend:** Rust
-- **Frontend:** React + TypeScript
-- **Styling:** Tailwind CSS
-- **Build tooling:** Vite
-- **Planned data layer:** SQLite via `rusqlite`
-- **Planned async runtime:** `tokio`
-- **Planned HTTP client:** `reqwest`
-
-## Learning Goals 🦀
-
-This repo is intentionally being built step by step to learn Rust the right way.
-
-- Understand ownership and borrowing through real app code
-- Learn when to pass `&T`, when to clone, and when to share state explicitly
-- Practice proper error handling with `Result`, `?`, and typed errors
-- Build intuition for async work with Tokio without hiding the complexity
-
-## Getting Started 🚀
+## Getting started 🚀
 
 ### Prerequisites
 
 - Node.js and npm
 - Rust toolchain
+- [Ollama](https://ollama.com) installed and running
 - Tauri system prerequisites for your platform
 
-### Run the app
+### 1. Start Ollama and pull a model
+
+```bash
+ollama serve              # if it isn't already running
+ollama pull llama3.1:8b   # or any instruction-following model
+```
+
+### 2. Run the app
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-### Build the frontend only
+TrendWave opens to a single prompt window. Type a question (or click an example), and watch it work.
+
+### Other commands
 
 ```bash
-npm run build
-```
-
-### Check the Rust backend
-
-```bash
+npm run build                                   # build the frontend only
+cargo test --manifest-path src-tauri/Cargo.toml # run the Rust unit tests
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-## Project Structure 🗂️
+## Settings ⚙️
+
+Open **Settings** from the sidebar to tune:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Ollama model | `llama3.1:8b` | Any locally installed model |
+| Ollama endpoint | `http://localhost:11434` | Where the local server listens |
+| Max price | `20` | "Cheap" ceiling — pricier names are filtered out |
+| Min score | `40` | Minimum composite score to surface a candidate |
+| Max results | `8` | Cap on returned candidates |
+| Scan news & sentiment | on | Pull headlines and score sentiment (slower) |
+
+Settings and watchlists persist in a local SQLite file (`trendwave.db`) in your OS app-data
+directory.
+
+## Project structure 🗂️
 
 ```text
 TrendWave/
-├── project_spec.md      # Architecture and implementation plan
-├── src/                 # React frontend
-├── src-tauri/           # Rust backend and Tauri config
-├── public/              # Static frontend assets
-└── README.md            # Project overview and workflow notes
+├── project_spec.md      # Architecture and design notes
+├── src/                 # React frontend (prompt UI)
+│   ├── App.tsx          # Orchestration + layout
+│   ├── components.tsx   # Presentational components
+│   ├── api.ts           # Typed Tauri command bridge
+│   └── types.ts         # Shared types (mirror of the Rust models)
+├── src-tauri/src/       # Rust backend
+│   ├── lib.rs           # App bootstrap, state, command registration
+│   ├── commands.rs      # Tauri IPC commands
+│   ├── research.rs      # The bottleneck → ranking pipeline
+│   ├── ollama.rs        # Local Ollama client
+│   ├── feeds.rs         # Free price + news feeds
+│   ├── db.rs            # SQLite persistence
+│   ├── model.rs         # Shared serializable types
+│   ├── settings.rs      # User settings
+│   └── error.rs         # Typed, serializable errors
+└── README.md
 ```
 
-## Commit Style 🧱
+## Privacy 🔒
 
-To keep the history easy to learn from, we want small, scoped commits:
-
-- `chore:` tooling, config, project setup
-- `docs:` README, notes, architecture updates
-- `feat:` one user-visible slice of a phase
-- `refactor:` cleanup without changing behavior
-- `fix:` bug fixes and regressions
-
-Examples:
-
-```bash
-git commit -m "chore: initialize TrendWave project metadata"
-git commit -m "docs: add TrendWave project README"
-git commit -m "feat: add tray menu shell for phase 1"
-```
-
-## Guiding Rules 🤝
-
-- Build one phase at a time
-- Prefer idiomatic Rust patterns over clever shortcuts
-- Avoid `.unwrap()` in production code
-- Explain memory and async decisions as we go
-
-TrendWave is early, but the foundation is now in place and ready for the first real Rust phase.
+TrendWave is local-first by design. Your prompts and results never leave your machine. The only
+outbound network calls are to free, public price and news endpoints and to your local Ollama server.
