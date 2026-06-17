@@ -1,0 +1,34 @@
+use serde::{Deserialize, Serialize};
+
+/// User-tunable configuration. Persisted as a single JSON row in SQLite so we
+/// can add fields later without a schema migration. Every field has a default
+/// so a fresh install works with zero setup beyond having Ollama running.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// Ollama HTTP endpoint. Local-first default; rarely changed.
+    pub ollama_endpoint: String,
+    /// Model used for reasoning. Must follow instructions / emit JSON well.
+    pub model: String,
+    /// "Cheap" ceiling: candidates priced above this are filtered out.
+    pub max_price: f64,
+    /// Lower bound (0-100) on the composite score for a stock to be surfaced.
+    pub min_score: f64,
+    /// Maximum number of ranked candidates returned per run.
+    pub max_results: u32,
+    /// Pull recent news + run sentiment. Disabling speeds runs up considerably.
+    pub use_news: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            ollama_endpoint: "http://localhost:11434".to_string(),
+            model: "llama3.1:8b".to_string(),
+            max_price: 20.0,
+            min_score: 40.0,
+            max_results: 8,
+            use_news: true,
+        }
+    }
+}
