@@ -10,11 +10,7 @@ pub struct Settings {
     pub ollama_endpoint: String,
     /// Model used for reasoning. Must follow instructions / emit JSON well.
     pub model: String,
-    /// "Cheap" ceiling: candidates priced above this are filtered out.
-    pub max_price: f64,
-    /// Lower bound (0-100) on the composite score for a stock to be surfaced.
-    pub min_score: f64,
-    /// Maximum number of ranked candidates returned per run.
+    /// Maximum number of ranked picks returned per run.
     pub max_results: u32,
     /// Pull recent news + run sentiment. Disabling speeds runs up considerably.
     pub use_news: bool,
@@ -25,8 +21,6 @@ impl Default for Settings {
         Self {
             ollama_endpoint: "http://localhost:11434".to_string(),
             model: "llama3.1:8b".to_string(),
-            max_price: 20.0,
-            min_score: 40.0,
             max_results: 8,
             use_news: true,
         }

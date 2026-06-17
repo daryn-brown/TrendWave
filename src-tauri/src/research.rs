@@ -8,25 +8,33 @@ use crate::settings::Settings;
 
 const SYSTEM_BOTTLENECK: &str = "\
 You are a sharp equity research analyst who specializes in SUPPLY-CHAIN and CAPACITY \
-BOTTLENECKS. Given a user's question about an industry, identify the real, current \
+BOTTLENECKS. Given a user's question about an industry, first identify the real, current \
 chokepoints (scarce components, limited production capacity, single-source suppliers, \
-permitting/logistics constraints) and the smaller, cheaper public companies most exposed \
-to relieving or supplying those bottlenecks. Favor under-followed small/mid caps over \
-mega-caps. Use real US-listed tickers. Respond with STRICT JSON only, no prose, matching: \
+permitting/logistics constraints). Then, for each bottleneck, name the PUBLIC COMPANIES \
+BEST POSITIONED TO SOLVE OR MONOPOLIZE it — the dominant suppliers, critical enablers, \
+picks-and-shovels plays, or emerging challengers with the most upside. Rank by competitive \
+positioning and upside, NOT by share price — include large caps if they are the dominant \
+beneficiary. Use real, currently US-listed tickers only. Return at least 3 companies in \
+total. Respond with STRICT JSON only, no prose, matching: \
 {\"industry\":string,\"summary\":string,\"bottlenecks\":[{\"title\":string,\
 \"description\":string,\"severity\":1-5,\"companies\":[{\"company\":string,\"ticker\":string,\
-\"why_cheap\":string,\"thesis\":string,\"upside\":string}]}]}. \
-severity is how acute the bottleneck is (5=severe). Include 2-4 companies per bottleneck.";
+\"thesis\":string,\"moat\":1-5,\"upside\":1-5,\"upside_rationale\":string}]}]}. \
+severity = how acute the bottleneck is (5=severe). moat = how dominant or monopoly-like the \
+company's position is in solving it (5=near-monopoly). upside = potential share-price upside \
+(5=highest). thesis = why this company is positioned to win this bottleneck. Include 2-4 \
+companies per bottleneck.";
 
 const SYSTEM_SENTIMENT: &str = "\
 You judge market sentiment from news headlines about one company. Respond with STRICT JSON \
 only: {\"score\":number} where score is between -1 (very bearish) and 1 (very bullish).";
 
-// Scoring weights — bottlenecks are intentionally the dominant signal.
-const W_BOTTLENECK: f64 = 50.0;
-const W_CHEAP: f64 = 20.0;
-const W_SENTIMENT: f64 = 20.0;
-const W_MOMENTUM: f64 = 10.0;
+// Scoring weights — positioning to win the bottleneck (severity + moat) plus
+// upside dominate; sentiment and momentum only refine. Price is never scored.
+const W_BOTTLENECK: f64 = 30.0;
+const W_MOAT: f64 = 30.0;
+const W_UPSIDE: f64 = 25.0;
+const W_SENTIMENT: f64 = 10.0;
+const W_MOMENTUM: f64 = 5.0;
 
 #[derive(Deserialize)]
 struct BottleneckPlan {
@@ -50,9 +58,10 @@ struct PlanBottleneck {
 struct PlanCompany {
     company: String,
     ticker: Option<String>,
-    why_cheap: Option<String>,
     thesis: Option<String>,
-    upside: Option<String>,
+    moat: Option<u8>,
+    upside: Option<u8>,
+    upside_rationale: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,20 +76,18 @@ struct Working {
 }
 
 /// Pure, deterministic scoring so it can be unit-tested without any network.
-/// Bottleneck severity dominates; cheapness, sentiment and momentum refine.
+/// Positioning to win the bottleneck (severity + moat) and upside dominate;
+/// sentiment and momentum refine. Share price is deliberately NOT a factor.
 pub fn score_candidate(
     severity: u8,
-    price: Option<f64>,
-    max_price: f64,
+    moat: u8,
+    upside: u8,
     sentiment: Option<f64>,
     change_pct: f64,
 ) -> f64 {
     let sev = (severity.clamp(1, 5) as f64) / 5.0;
-
-    let cheap = match price {
-        Some(p) if max_price > 0.0 => (1.0 - (p / max_price)).clamp(0.0, 1.0),
-        _ => 0.0,
-    };
+    let moat_n = (moat.clamp(1, 5) as f64) / 5.0;
+    let up = (upside.clamp(1, 5) as f64) / 5.0;
 
     // Map -1..1 sentiment onto 0..1; unknown sentiment sits neutral.
     let senti = ((sentiment.unwrap_or(0.0).clamp(-1.0, 1.0)) + 1.0) / 2.0;
@@ -88,7 +95,7 @@ pub fn score_candidate(
     // +20% over the window → full marks, -20% → zero, clamped.
     let momentum = (0.5 + change_pct / 40.0).clamp(0.0, 1.0);
 
-    W_BOTTLENECK * sev + W_CHEAP * cheap + W_SENTIMENT * senti + W_MOMENTUM * momentum
+    W_BOTTLENECK * sev + W_MOAT * moat_n + W_UPSIDE * up + W_SENTIMENT * senti + W_MOMENTUM * momentum
 }
 
 fn normalize_ticker(raw: &str) -> String {
@@ -161,9 +168,10 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                     company: c.company.clone(),
                     price: None,
                     bottleneck: b.title.clone(),
-                    bottleneck_thesis: c.thesis.clone().unwrap_or_default(),
-                    why_cheap: c.why_cheap.clone().unwrap_or_default(),
-                    upside_rationale: c.upside.clone().unwrap_or_default(),
+                    thesis: c.thesis.clone().unwrap_or_default(),
+                    moat: c.moat.unwrap_or(3).clamp(1, 5),
+                    upside: c.upside.unwrap_or(3).clamp(1, 5),
+                    upside_rationale: c.upside_rationale.clone().unwrap_or_default(),
                     sentiment: None,
                     news: Vec::new(),
                     score: 0.0,
@@ -172,10 +180,11 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         }
     }
 
-    // Price every candidate concurrently; fall back to name→symbol resolution.
+    // Price every candidate concurrently (for context/display only), falling
+    // back to name→symbol resolution. Price never filters anyone out.
     emit(ProgressEvent::Stage {
         stage: "pricing".into(),
-        message: "Pricing candidates and checking they're cheap…".into(),
+        message: "Checking live prices for context…".into(),
     });
     let mut set = tokio::task::JoinSet::new();
     for (idx, w) in working.iter().enumerate() {
@@ -207,14 +216,9 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         }
     }
 
-    // Keep only validated, genuinely cheap names.
-    working.retain(|w| {
-        w.candidate
-            .price
-            .as_ref()
-            .map(|p| p.price > 0.0 && p.price <= settings.max_price)
-            .unwrap_or(false)
-    });
+    // Drop only the ones with no usable ticker at all; everything the model
+    // surfaced otherwise gets recommended (the user always wants picks back).
+    working.retain(|w| !w.candidate.ticker.is_empty());
 
     // News + sentiment for the survivors.
     if settings.use_news {
@@ -238,13 +242,13 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     // Score, rank, trim.
     emit(ProgressEvent::Stage {
         stage: "ranking".into(),
-        message: "Ranking by bottleneck exposure…".into(),
+        message: "Ranking by positioning & upside…".into(),
     });
     for w in working.iter_mut() {
         w.candidate.score = score_candidate(
             w.severity,
-            w.candidate.price.as_ref().map(|p| p.price),
-            settings.max_price,
+            w.candidate.moat,
+            w.candidate.upside,
             w.candidate.sentiment,
             w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
         );
@@ -257,14 +261,13 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     });
     working.truncate(settings.max_results as usize);
 
+    // Always surface the ranked picks — no score threshold to clear.
     let mut candidates = Vec::with_capacity(working.len());
     for w in working {
-        if w.candidate.score >= settings.min_score {
-            emit(ProgressEvent::Candidate {
-                candidate: w.candidate.clone(),
-            });
-            candidates.push(w.candidate);
-        }
+        emit(ProgressEvent::Candidate {
+            candidate: w.candidate.clone(),
+        });
+        candidates.push(w.candidate);
     }
 
     let result = ResearchResult {
@@ -301,31 +304,38 @@ mod tests {
 
     #[test]
     fn severe_bottleneck_outscores_mild_one() {
-        let severe = score_candidate(5, Some(10.0), 20.0, Some(0.5), 5.0);
-        let mild = score_candidate(1, Some(10.0), 20.0, Some(0.5), 5.0);
+        let severe = score_candidate(5, 3, 3, Some(0.5), 5.0);
+        let mild = score_candidate(1, 3, 3, Some(0.5), 5.0);
         assert!(severe > mild);
     }
 
     #[test]
-    fn cheaper_stock_scores_higher_all_else_equal() {
-        let cheap = score_candidate(3, Some(2.0), 20.0, None, 0.0);
-        let pricey = score_candidate(3, Some(19.0), 20.0, None, 0.0);
-        assert!(cheap > pricey);
+    fn stronger_moat_scores_higher_all_else_equal() {
+        let monopoly = score_candidate(3, 5, 3, None, 0.0);
+        let commodity = score_candidate(3, 1, 3, None, 0.0);
+        assert!(monopoly > commodity);
     }
 
     #[test]
-    fn bottleneck_weight_dominates_sentiment() {
+    fn higher_upside_scores_higher_all_else_equal() {
+        let big = score_candidate(3, 3, 5, None, 0.0);
+        let small = score_candidate(3, 3, 1, None, 0.0);
+        assert!(big > small);
+    }
+
+    #[test]
+    fn positioning_dominates_sentiment() {
         // A severe bottleneck with bad sentiment should still beat a mild
-        // bottleneck with great sentiment — bottlenecks are the point.
-        let severe_bad_news = score_candidate(5, Some(10.0), 20.0, Some(-1.0), 0.0);
-        let mild_great_news = score_candidate(1, Some(10.0), 20.0, Some(1.0), 0.0);
+        // bottleneck with great sentiment — positioning is the point.
+        let severe_bad_news = score_candidate(5, 3, 3, Some(-1.0), 0.0);
+        let mild_great_news = score_candidate(1, 3, 3, Some(1.0), 0.0);
         assert!(severe_bad_news > mild_great_news);
     }
 
     #[test]
     fn score_stays_within_bounds() {
-        let max = score_candidate(5, Some(0.01), 20.0, Some(1.0), 100.0);
-        let min = score_candidate(1, Some(20.0), 20.0, Some(-1.0), -100.0);
+        let max = score_candidate(5, 5, 5, Some(1.0), 100.0);
+        let min = score_candidate(1, 1, 1, Some(-1.0), -100.0);
         assert!(max <= 100.0 + f64::EPSILON);
         assert!(min >= 0.0 - f64::EPSILON);
     }
