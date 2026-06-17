@@ -178,8 +178,8 @@ export default function App() {
           <header>
             <h1 className="text-2xl font-bold tracking-tight">Find the bottleneck. Find the stock.</h1>
             <p className="mt-1 text-sm text-slate-500">
-              Ask about an industry. TrendWave finds the supply chokepoints, then the cheap, under-the-radar
-              names exposed to them — all locally via Ollama.
+              Ask about an industry. TrendWave finds the supply chokepoints, then the public companies
+              best positioned to solve or monopolize them — ranked by upside, all locally via Ollama.
             </p>
           </header>
 
@@ -224,7 +224,7 @@ export default function App() {
           {candidates.length > 0 && (
             <section className="space-y-3">
               <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
-                Candidates ({candidates.length})
+                Stock picks ({candidates.length})
               </h3>
               <div className="space-y-4">
                 {candidates.map((c, i) => (
@@ -236,8 +236,8 @@ export default function App() {
 
           {result && candidates.length === 0 && !running && (
             <p className="rounded-2xl border border-slate-200 bg-white/70 p-4 text-sm text-slate-500">
-              No candidates cleared your filters. Try widening the price cap or lowering the minimum score in
-              Settings, or rephrase the industry.
+              No stock picks came back this time — the model didn't return usable tickers. Try
+              rephrasing the industry or re-running.
             </p>
           )}
 

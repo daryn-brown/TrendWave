@@ -225,6 +225,12 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
         <span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 ring-1 ring-sky-100">
           {candidate.bottleneck}
         </span>
+        <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-100">
+          Moat {candidate.moat}/5
+        </span>
+        <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 ring-1 ring-emerald-100">
+          Upside {candidate.upside}/5
+        </span>
         <span className={`text-xs font-medium ${senti.color}`}>● {senti.text}</span>
         {price && price.avg_volume > 0 && (
           <span className="text-xs text-slate-400">avg vol {formatVolume(price.avg_volume)}</span>
@@ -232,10 +238,9 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
       </div>
 
       <dl className="mt-4 space-y-3">
-        {candidate.bottleneck_thesis && (
-          <Field label="Bottleneck thesis" value={candidate.bottleneck_thesis} />
+        {candidate.thesis && (
+          <Field label="Why it's positioned to win" value={candidate.thesis} />
         )}
-        {candidate.why_cheap && <Field label="Why it's cheap" value={candidate.why_cheap} />}
         {candidate.upside_rationale && <Field label="Upside" value={candidate.upside_rationale} />}
       </dl>
 
@@ -371,11 +376,7 @@ export function SettingsModal({
         <div className="mt-4 space-y-4">
           <TextField label="Ollama model" value={form.model} onChange={(v) => update("model", v)} placeholder="llama3.1:8b" />
           <TextField label="Ollama endpoint" value={form.ollama_endpoint} onChange={(v) => update("ollama_endpoint", v)} placeholder="http://localhost:11434" />
-          <div className="grid grid-cols-3 gap-3">
-            <NumberField label="Max price" value={form.max_price} onChange={(v) => update("max_price", v)} step={1} />
-            <NumberField label="Min score" value={form.min_score} onChange={(v) => update("min_score", v)} step={5} />
-            <NumberField label="Max results" value={form.max_results} onChange={(v) => update("max_results", v)} step={1} />
-          </div>
+          <NumberField label="Max results" value={form.max_results} onChange={(v) => update("max_results", v)} step={1} />
           <label className="flex items-center gap-2 text-sm text-slate-700">
             <input type="checkbox" checked={form.use_news} onChange={(e) => update("use_news", e.target.checked)} className="h-4 w-4 rounded border-slate-300" />
             Scan news & compute sentiment (slower)

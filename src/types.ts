@@ -27,8 +27,9 @@ export interface Candidate {
   company: string;
   price?: PriceData | null;
   bottleneck: string;
-  bottleneck_thesis: string;
-  why_cheap: string;
+  thesis: string;
+  moat: number; // 1..5
+  upside: number; // 1..5
   upside_rationale: string;
   sentiment?: number | null;
   news: NewsItem[];
@@ -53,8 +54,6 @@ export type ProgressEvent =
 export interface Settings {
   ollama_endpoint: string;
   model: string;
-  max_price: number;
-  min_score: number;
   max_results: number;
   use_news: boolean;
 }
