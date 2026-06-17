@@ -45,6 +45,7 @@ click later.
   `feed-rs` (RSS), `thiserror` (typed errors)
 - **Intelligence:** local Ollama model (default `llama3.1:8b`)
 - **Frontend:** React + TypeScript + Tailwind CSS, built with Vite
+- **Updates:** Tauri updater + process plugins, signed releases via GitHub Actions
 - **Data:** free public endpoints (Yahoo Finance chart + RSS). No keys required.
 
 ## Getting started 🚀
@@ -80,6 +81,34 @@ cargo test --manifest-path src-tauri/Cargo.toml # run the Rust unit tests
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
+## Install & automatic updates ⬇️
+
+TrendWave ships as a **self-updating desktop app** — install it once and it keeps itself current.
+
+### Install
+
+Grab the latest `.dmg` from the
+[Releases page](https://github.com/daryn-brown/TrendWave/releases/latest), open it, and drag
+**TrendWave** into **Applications**. The app isn't signed with an Apple Developer certificate, so the
+first launch needs a one-time approval: **right-click the app → Open → Open** (or run
+`xattr -dr com.apple.quarantine /Applications/TrendWave.app`).
+
+### Updating
+
+Every merge to `main` triggers the [`release` workflow](.github/workflows/release.yml), which builds a
+**signed universal macOS bundle** and publishes it as a GitHub Release. The running app checks that
+release on launch — and whenever you click **Check for updates** in the sidebar. When a newer build
+exists you get an **Update available** banner: click **Download &amp; install**, then **Restart now**.
+Each update is verified against an embedded public key before it is applied.
+
+### Maintainer setup (one-time)
+
+Updates are signed with a [minisign](https://jedisct1.github.io/minisign/) keypair created by
+`npm run tauri signer generate`. The **public** key lives in `src-tauri/tauri.conf.json`; the
+**private** key and its password are stored as the repo secrets `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (used by the workflow). Keep the private key safe and out of
+version control — without it you can't publish updates that installed apps will accept.
+
 ## Settings ⚙️
 
 Open **Settings** from the sidebar to tune:
@@ -103,6 +132,7 @@ TrendWave/
 │   ├── App.tsx          # Orchestration + layout
 │   ├── components.tsx   # Presentational components
 │   ├── api.ts           # Typed Tauri command bridge
+│   ├── updater.ts       # In-app auto-update helpers
 │   └── types.ts         # Shared types (mirror of the Rust models)
 ├── src-tauri/src/       # Rust backend
 │   ├── lib.rs           # App bootstrap, state, command registration
@@ -114,6 +144,8 @@ TrendWave/
 │   ├── model.rs         # Shared serializable types
 │   ├── settings.rs      # User settings
 │   └── error.rs         # Typed, serializable errors
+├── .github/workflows/
+│   └── release.yml      # Build + publish signed auto-update releases
 └── README.md
 ```
 
