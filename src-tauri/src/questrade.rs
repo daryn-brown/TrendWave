@@ -256,7 +256,24 @@ pub async fn ensure_session(http: &reqwest::Client) -> AppResult<(String, String
     if auth.is_access_valid() {
         return Ok((auth.access_token, auth.api_server));
     }
-    match exchange(http, &auth.refresh_token).await {
+    refresh_with(http, &auth.refresh_token).await
+}
+
+/// Force a brand-new session by exchanging the stored refresh token, ignoring the
+/// locally-cached access token. Used to recover when an access token that still
+/// looks valid is rejected server-side (a 401), which `ensure_session` can't see.
+pub async fn force_refresh(http: &reqwest::Client) -> AppResult<(String, String)> {
+    let auth = load_auth().ok_or(AppError::QuestradeNotConnected)?;
+    refresh_with(http, &auth.refresh_token).await
+}
+
+/// Exchange a refresh token and persist the rotated session, mapping exchange
+/// failures onto the user-facing error contract.
+async fn refresh_with(
+    http: &reqwest::Client,
+    refresh_token: &str,
+) -> AppResult<(String, String)> {
+    match exchange(http, refresh_token).await {
         Ok(refreshed) => {
             save_auth(&refreshed)?;
             Ok((refreshed.access_token, refreshed.api_server))
@@ -268,6 +285,32 @@ pub async fn ensure_session(http: &reqwest::Client) -> AppResult<(String, String
                 .into(),
         )),
         Err(ExchangeError::Transport(msg)) => Err(AppError::Questrade(msg)),
+    }
+}
+
+/// Run a read-only operation against an authenticated client, transparently
+/// recovering from a stale-but-not-expired access token. If the first attempt is
+/// rejected with a 401, mint a fresh session and retry exactly once. A second 401
+/// (even a brand-new token is refused) means the credentials are no longer usable,
+/// so it surfaces as `QuestradeNotConnected` to prompt a reconnect instead of a
+/// confusing raw 401.
+pub async fn run_with_session<T, F, Fut>(http: &reqwest::Client, op: F) -> AppResult<T>
+where
+    F: Fn(QuestradeClient) -> Fut,
+    Fut: std::future::Future<Output = AppResult<T>>,
+{
+    let (access_token, api_server) = ensure_session(http).await?;
+    let client = QuestradeClient::new(http.clone(), access_token, api_server);
+    match op(client).await {
+        Err(AppError::QuestradeUnauthorized) => {
+            let (access_token, api_server) = force_refresh(http).await?;
+            let client = QuestradeClient::new(http.clone(), access_token, api_server);
+            match op(client).await {
+                Err(AppError::QuestradeUnauthorized) => Err(AppError::QuestradeNotConnected),
+                other => other,
+            }
+        }
+        other => other,
     }
 }
 
@@ -493,6 +536,11 @@ impl QuestradeClient {
             .await
             .map_err(|e| AppError::Questrade(format!("request to {path} failed: {e}")))?;
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            // Token rejected even though it looked valid locally. Signalled
+            // distinctly so the caller can mint a fresh one and retry once.
+            return Err(AppError::QuestradeUnauthorized);
+        }
         if !status.is_success() {
             return Err(AppError::Questrade(format!("{path} returned HTTP {status}")));
         }
@@ -818,5 +866,52 @@ mod tests {
         assert_eq!(p.market_value, Some(2000.0));
         assert_eq!(p.average_buy_price, Some(100.0)); // 2000 cost / 20 shares
         assert_eq!(p.currency, "CAD");
+    }
+
+    /// One-shot HTTP server that returns `status_line` (with a small JSON body) to
+    /// the first request, so client error-mapping can be exercised offline.
+    async fn serve_once(status_line: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = sock.read(&mut buf).await;
+                let body = "{\"code\":1017,\"message\":\"bad token\"}";
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.flush().await;
+            }
+        });
+        format!("http://{addr}/")
+    }
+
+    #[tokio::test]
+    async fn data_call_maps_401_to_unauthorized() {
+        let base = serve_once("401 Unauthorized").await;
+        let client = QuestradeClient::new(reqwest::Client::new(), "stale-token", base);
+        // A 401 must be the distinct signal that drives a refresh-and-retry, not a
+        // generic error that dead-ends under a "Connected" badge.
+        assert!(matches!(
+            client.find_listing("AAPL").await,
+            Err(AppError::QuestradeUnauthorized)
+        ));
+    }
+
+    #[tokio::test]
+    async fn data_call_maps_non_401_to_generic_error() {
+        let base = serve_once("500 Internal Server Error").await;
+        let client = QuestradeClient::new(reqwest::Client::new(), "tok", base);
+        // Anything other than 401 stays a generic Questrade error (no token retry).
+        assert!(matches!(
+            client.find_listing("AAPL").await,
+            Err(AppError::Questrade(_))
+        ));
     }
 }
