@@ -14,7 +14,7 @@ use crate::feeds;
 use crate::model::{Listing, ListingInfo, Portfolio, ProgressEvent, ResearchResult};
 use crate::oauth;
 use crate::ollama::OllamaClient;
-use crate::questrade::{self, QuestradeClient};
+use crate::questrade;
 use crate::research;
 use crate::robinhood::{self, RobinhoodClient};
 use crate::settings::Settings;
@@ -313,8 +313,12 @@ pub async fn questrade_portfolio(state: State<'_, AppState>) -> AppResult<Portfo
 
 /// Pull a read-only portfolio via the Questrade REST client and cache it.
 async fn questrade_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
-    let (access_token, api_server) = match questrade::ensure_session(&state.http).await {
-        Ok(session) => session,
+    let portfolio = match questrade::run_with_session(&state.http, |client| async move {
+        client.fetch_portfolio().await
+    })
+    .await
+    {
+        Ok(portfolio) => portfolio,
         Err(err @ AppError::QuestradeNotConnected) => {
             if let Ok(conn) = state.lock_db() {
                 let _ = db::set_flag(&conn, db::FLAG_QUESTRADE_CONNECTED, false);
@@ -323,8 +327,6 @@ async fn questrade_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
         }
         Err(err) => return Err(err),
     };
-    let client = QuestradeClient::new(state.http.clone(), access_token, api_server);
-    let portfolio = client.fetch_portfolio().await?;
     if let Ok(mut guard) = state.questrade.lock() {
         *guard = Some(portfolio.clone());
     }
@@ -370,9 +372,11 @@ pub async fn questrade_find_listing(
             return Err(AppError::QuestradeNotConnected);
         }
     }
-    let (access_token, api_server) = questrade::ensure_session(&state.http).await?;
-    let client = QuestradeClient::new(state.http.clone(), access_token, api_server);
-    client.find_listing(&symbol).await
+    questrade::run_with_session(&state.http, |client| {
+        let symbol = symbol.clone();
+        async move { client.find_listing(&symbol).await }
+    })
+    .await
 }
 
 /// Shared body for both the ad-hoc prompt and watchlist re-runs: load settings,
