@@ -334,21 +334,22 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
         <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-100">
           Moat {candidate.moat}/5
         </span>
-        {candidate.growth?.revenue_growth_yoy != null ? (
-          <span
-            className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${
-              candidate.growth.revenue_growth_yoy >= 0
-                ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
-                : "bg-rose-50 text-rose-700 ring-rose-100"
-            }`}
-          >
-            Rev {formatGrowthPct(candidate.growth.revenue_growth_yoy)} {candidate.growth.annual_growth ? "YoY" : "qtr"}
-          </span>
-        ) : (
-          <span className="rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-slate-100">
-            Growth {Math.round(candidate.growth_score * 100)}
-          </span>
-        )}
+        {!candidate.identity_mismatch &&
+          (candidate.growth?.revenue_growth_yoy != null ? (
+            <span
+              className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${
+                candidate.growth.revenue_growth_yoy >= 0
+                  ? "bg-emerald-50 text-emerald-700 ring-emerald-100"
+                  : "bg-rose-50 text-rose-700 ring-rose-100"
+              }`}
+            >
+              Rev {formatGrowthPct(candidate.growth.revenue_growth_yoy)} {candidate.growth.annual_growth ? "YoY" : "qtr"}
+            </span>
+          ) : (
+            <span className="rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-slate-100">
+              Growth {Math.round(candidate.growth_score * 100)}
+            </span>
+          ))}
         <span className={`text-xs font-medium ${senti.color}`}>● {senti.text}</span>
         {price && price.avg_volume > 0 && (
           <span className="text-xs text-slate-400">avg vol {formatVolume(price.avg_volume)}</span>
@@ -364,7 +365,14 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
         )}
       </dl>
 
-      {candidate.growth ? (
+      {candidate.identity_mismatch ? (
+        <p className="mt-4 rounded-xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500 ring-1 ring-slate-200">
+          Financials hidden — these SEC EDGAR / Yahoo figures are{" "}
+          <strong className="font-semibold text-slate-600">{candidate.verified_name ?? candidate.ticker}</strong>’s
+          actuals for ticker {candidate.ticker}, and don’t describe the “{candidate.company}” business
+          in this thesis. They were excluded so they can’t be read as support for the pick.
+        </p>
+      ) : candidate.growth ? (
         <GrowthPanel growth={candidate.growth} />
       ) : (
         <p className="mt-3 text-xs text-slate-400">No growth fundamentals found for this ticker.</p>
