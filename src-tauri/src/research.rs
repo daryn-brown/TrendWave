@@ -104,6 +104,24 @@ pub fn score_candidate(
     W_BOTTLENECK * sev + W_MOAT * moat_n + W_GROWTH * growth_n + W_SENTIMENT * senti + W_MOMENTUM * momentum
 }
 
+/// Multiplicative penalty applied when a candidate's ticker resolves to a
+/// company that plainly contradicts the model's claimed business (see
+/// `name_matches`). A confirmed misattribution — e.g. a gold miner pitched as a
+/// solid-state battery-equipment maker — is demoted out of the top tier so it
+/// can't masquerade as a legitimate high-conviction pick. It is *halved*, never
+/// zeroed: the model sometimes returns the bare ticker as the company name,
+/// which trips the check, so we keep the pick visible (with its warning) rather
+/// than risk burying a legitimate one.
+const IDENTITY_MISMATCH_PENALTY: f64 = 0.5;
+
+fn penalize_for_identity(base: f64, mismatch: bool) -> f64 {
+    if mismatch {
+        base * IDENTITY_MISMATCH_PENALTY
+    } else {
+        base
+    }
+}
+
 fn normalize_ticker(raw: &str) -> String {
     raw.trim()
         .trim_start_matches('$')
@@ -342,13 +360,14 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             (w.candidate.upside.clamp(1, 5) as f64) / 5.0
         };
         w.candidate.growth_score = growth;
-        w.candidate.score = score_candidate(
+        let base = score_candidate(
             w.severity,
             w.candidate.moat,
             growth,
             w.candidate.sentiment,
             w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
         );
+        w.candidate.score = penalize_for_identity(base, w.candidate.identity_mismatch);
     }
     working.sort_by(|a, b| {
         b.candidate
@@ -467,5 +486,16 @@ mod tests {
         assert!(name_matches("Anything Inc", ""));
         // Pure noise tokens collapse to empty → treated as a match, not a warning.
         assert!(name_matches("The Company", "Holdings Group"));
+    }
+
+    #[test]
+    fn identity_mismatch_demotes_but_never_zeroes() {
+        let base = score_candidate(5, 5, 0.8, Some(0.5), 10.0);
+        let penalized = penalize_for_identity(base, true);
+        assert!(penalized < base, "a mismatch must lower the score");
+        assert!(penalized > 0.0, "a mismatch must not zero a pick out");
+        assert_eq!(penalized, base * IDENTITY_MISMATCH_PENALTY);
+        // A clean candidate is untouched.
+        assert_eq!(penalize_for_identity(base, false), base);
     }
 }
