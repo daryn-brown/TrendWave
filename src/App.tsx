@@ -3,6 +3,7 @@ import "./App.css";
 import * as api from "./api";
 import {
   BottleneckList,
+  BrokerPortfolioTabs,
   CandidateCard,
   ErrorBanner,
   IconRefresh,
@@ -16,6 +17,7 @@ import {
   SettingsModal,
   UpdateBanner,
   WatchlistSidebar,
+  type BrokerTab,
   type UpdatePhase,
 } from "./components";
 import type {
@@ -23,6 +25,7 @@ import type {
   Bottleneck,
   Candidate,
   ProgressEvent,
+  QuestradeStatus,
   ResearchResult,
   RobinhoodStatus,
   Settings,
@@ -58,6 +61,9 @@ export default function App() {
   const [unlocking, setUnlocking] = useState(false);
   const autoUnlockTried = useRef(false);
 
+  const [questrade, setQuestrade] = useState<QuestradeStatus | null>(null);
+  const [qtBusy, setQtBusy] = useState(false);
+
   const [update, setUpdate] = useState<Update | null>(null);
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase | null>(null);
   const [updateProgress, setUpdateProgress] = useState(0);
@@ -88,6 +94,19 @@ export default function App() {
           api
             .robinhoodPortfolio()
             .then((portfolio) => setRobinhood({ connected: true, locked: false, portfolio }))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
+    // Same treatment for a previously-authorized Questrade session (read-only).
+    api
+      .questradeStatus()
+      .then((s) => {
+        setQuestrade(s);
+        if (s.connected && !s.portfolio) {
+          api
+            .questradePortfolio()
+            .then((portfolio) => setQuestrade({ connected: true, portfolio }))
             .catch(() => {});
         }
       })
@@ -279,6 +298,43 @@ export default function App() {
 
   const handleUnlock = () => runUnlock(false);
 
+  const handleConnectQuestrade = async (token: string) => {
+    setQtBusy(true);
+    setError(null);
+    try {
+      setQuestrade(await api.questradeConnect(token));
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setQtBusy(false);
+    }
+  };
+
+  const handleDisconnectQuestrade = async () => {
+    setQtBusy(true);
+    try {
+      await api.questradeDisconnect();
+      setQuestrade({ connected: false, portfolio: null });
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setQtBusy(false);
+    }
+  };
+
+  const handleRefreshQuestradePortfolio = async () => {
+    setQtBusy(true);
+    setError(null);
+    try {
+      const portfolio = await api.questradePortfolio();
+      setQuestrade({ connected: true, portfolio });
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setQtBusy(false);
+    }
+  };
+
   const handleCheckUpdates = async () => {
     if (updatePhase === "downloading") return;
     setUpdateToast("Checking for updates…");
@@ -374,18 +430,46 @@ export default function App() {
 
           {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
-          {robinhood?.connected &&
-            (robinhood.locked ? (
-              <PortfolioLocked busy={unlocking} onUnlock={handleUnlock} />
-            ) : robinhood.portfolio ? (
-              <PortfolioPanel
-                portfolio={robinhood.portfolio}
-                busy={rhBusy}
-                onRefresh={handleRefreshPortfolio}
-              />
-            ) : (
-              <PortfolioEmpty busy={rhBusy} onLoad={handleRefreshPortfolio} />
-            ))}
+          {(() => {
+            const brokerTabs: BrokerTab[] = [];
+            if (robinhood?.connected) {
+              brokerTabs.push({
+                broker: "robinhood",
+                content: robinhood.locked ? (
+                  <PortfolioLocked busy={unlocking} onUnlock={handleUnlock} />
+                ) : robinhood.portfolio ? (
+                  <PortfolioPanel
+                    portfolio={robinhood.portfolio}
+                    busy={rhBusy}
+                    onRefresh={handleRefreshPortfolio}
+                    broker="robinhood"
+                  />
+                ) : (
+                  <PortfolioEmpty busy={rhBusy} onLoad={handleRefreshPortfolio} broker="robinhood" />
+                ),
+              });
+            }
+            if (questrade?.connected) {
+              brokerTabs.push({
+                broker: "questrade",
+                content: questrade.portfolio ? (
+                  <PortfolioPanel
+                    portfolio={questrade.portfolio}
+                    busy={qtBusy}
+                    onRefresh={handleRefreshQuestradePortfolio}
+                    broker="questrade"
+                  />
+                ) : (
+                  <PortfolioEmpty
+                    busy={qtBusy}
+                    onLoad={handleRefreshQuestradePortfolio}
+                    broker="questrade"
+                  />
+                ),
+              });
+            }
+            return <BrokerPortfolioTabs tabs={brokerTabs} />;
+          })()}
 
           {running && <ProgressLog messages={messages} running={running} />}
 
@@ -438,6 +522,10 @@ export default function App() {
           onConnectRobinhood={handleConnectRobinhood}
           onDisconnectRobinhood={handleDisconnectRobinhood}
           biometricAvailable={bioAvailable}
+          questrade={questrade}
+          questradeBusy={qtBusy}
+          onConnectQuestrade={handleConnectQuestrade}
+          onDisconnectQuestrade={handleDisconnectQuestrade}
         />
       )}
 
