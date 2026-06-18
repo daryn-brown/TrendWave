@@ -490,7 +490,11 @@ export default function App() {
               </h3>
               <div className="space-y-4">
                 {candidates.map((c, i) => (
-                  <CandidateCard key={`${c.ticker}-${i}`} candidate={c} />
+                  <CandidateCard
+                    key={`${c.ticker}-${i}`}
+                    candidate={c}
+                    questradeConnected={!!questrade?.connected}
+                  />
                 ))}
               </div>
             </section>
