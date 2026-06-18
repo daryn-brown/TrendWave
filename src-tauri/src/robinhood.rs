@@ -282,7 +282,8 @@ impl RobinhoodClient {
 
         let mut tools_used = Vec::new();
 
-        let positions = if let Some(t) = select_tool(&tools, &["position", "holding", "portfolio"]) {
+        let positions_tool = select_tool(&tools, &["position", "holding", "portfolio"]);
+        let positions = if let Some(t) = positions_tool {
             tools_used.push(t.name.clone());
             let res = self.mcp.call_tool(&t.name, json!({})).await?;
             parse_positions(&tool_result_value(&res))
@@ -290,7 +291,8 @@ impl RobinhoodClient {
             Vec::new()
         };
 
-        let account = if let Some(t) = select_tool(&tools, &["account", "balance"]) {
+        let account_tool = select_tool(&tools, &["account", "balance"]);
+        let account = if let Some(t) = account_tool {
             // Don't fail the whole snapshot if the account tool errors.
             if let Ok(res) = self.mcp.call_tool(&t.name, json!({})).await {
                 let parsed = parse_account(&tool_result_value(&res));
@@ -306,9 +308,31 @@ impl RobinhoodClient {
         };
 
         if positions.is_empty() && account.is_none() {
-            return Err(AppError::Robinhood(
-                "Connected, but no read-only positions/account tools were available.".into(),
-            ));
+            // Surface what the server actually offered so the tool selector can be
+            // tuned to Robinhood's real API instead of guessing.
+            let available = tools
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let msg = if positions_tool.is_none() && account_tool.is_none() {
+                format!(
+                    "Connected, but none of Robinhood's tools matched a read-only positions \
+                     or account read. Tools the server exposed: [{available}]."
+                )
+            } else {
+                let tried = [positions_tool, account_tool]
+                    .into_iter()
+                    .flatten()
+                    .map(|t| t.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "Connected and called [{tried}], but couldn't recognize any positions or \
+                     account fields in the response. All tools the server exposed: [{available}]."
+                )
+            };
+            return Err(AppError::Robinhood(msg));
         }
 
         Ok(Portfolio {
