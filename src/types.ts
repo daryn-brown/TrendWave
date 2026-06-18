@@ -79,6 +79,7 @@ export interface Portfolio {
   account?: AccountSummary | null;
   as_of: string;
   tools_used: string[];
+  debug?: string[];
 }
 
 export interface RobinhoodStatus {

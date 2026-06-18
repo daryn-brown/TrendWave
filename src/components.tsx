@@ -798,8 +798,8 @@ export function PortfolioPanel({
             <thead>
               <tr className="bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-400 dark:bg-slate-800/60 dark:text-slate-500">
                 <th className="px-3 py-2 font-medium">Ticker</th>
-                <th className="px-3 py-2 text-right font-medium">Qty</th>
                 <th className="px-3 py-2 text-right font-medium">Today</th>
+                <th className="px-3 py-2 text-right font-medium">Qty</th>
                 <th className="px-3 py-2 text-right font-medium">Value</th>
               </tr>
             </thead>
@@ -819,9 +819,6 @@ export function PortfolioPanel({
                       {p.name && (
                         <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">{p.name}</span>
                       )}
-                    </td>
-                    <td className="px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
-                      {p.quantity}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-2">
@@ -845,6 +842,9 @@ export function PortfolioPanel({
                         )}
                       </div>
                     </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                      {p.quantity}
+                    </td>
                     <td className="px-3 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">
                       {p.market_value == null ? "—" : formatPrice(p.market_value, p.currency)}
                     </td>
@@ -862,6 +862,11 @@ export function PortfolioPanel({
         As of {new Date(portfolio.as_of).toLocaleString()}
         {portfolio.tools_used.length > 0 && ` · via ${portfolio.tools_used.join(", ")}`}
       </p>
+      {portfolio.debug && portfolio.debug.length > 0 && (
+        <p className="mt-1 text-[10px] text-amber-600 dark:text-amber-400/80">
+          Live values unavailable for some rows — {portfolio.debug.join("; ")}
+        </p>
+      )}
     </section>
   );
 }
