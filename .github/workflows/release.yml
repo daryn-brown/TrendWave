@@ -43,7 +43,7 @@ jobs:
       - name: Set version from run number
         id: ver
         run: |
-          VERSION="0.1.${{ github.run_number }}"
+          VERSION="1.0.${{ github.run_number }}"
           node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
           node -e "const fs=require('fs');const p='package.json';const c=JSON.parse(fs.readFileSync(p));c.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
