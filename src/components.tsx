@@ -305,7 +305,7 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
               </span>
             )}
           </div>
-          <p className="mt-0.5 text-sm text-slate-500">{candidate.company}</p>
+          <p className="mt-0.5 text-sm text-slate-500">{candidate.verified_name ?? candidate.company}</p>
         </div>
         <div className="text-right">
           <div className={`text-2xl font-bold ${scoreColor(candidate.score)}`}>
@@ -314,6 +314,18 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
           <div className="text-[10px] font-medium uppercase tracking-wider text-slate-400">score</div>
         </div>
       </header>
+
+      {candidate.identity_mismatch && (
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800 ring-1 ring-amber-200">
+          <span aria-hidden className="mt-px font-semibold">⚠</span>
+          <span>
+            <strong>{candidate.ticker}</strong> is{" "}
+            <strong>{candidate.verified_name ?? candidate.company}</strong> — which may not match this
+            thesis. The model proposed “{candidate.company}”; confirm the ticker is the company you
+            intend before acting on the figures below.
+          </span>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 ring-1 ring-sky-100">

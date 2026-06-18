@@ -24,10 +24,16 @@ pub struct NewsItem {
 }
 
 /// Market snapshot for a candidate, pulled from free price feeds.
+/// `#[serde(default)]` keeps older saved results (without `name`) loadable.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PriceData {
     pub price: f64,
     pub currency: String,
+    /// Authoritative instrument name from the feed (Yahoo `longName`/`shortName`).
+    /// This is the *real-world identity* of the ticker, used to catch cases where
+    /// the model stamped a real ticker onto an unrelated company/sector.
+    pub name: Option<String>,
     /// Percent change over the recent lookback window.
     pub change_pct: f64,
     pub last_volume: f64,
@@ -72,6 +78,14 @@ pub struct GrowthData {
 pub struct Candidate {
     pub ticker: String,
     pub company: String,
+    /// Authoritative company name for `ticker`, resolved from the price feed.
+    /// When present the UI shows this instead of the model's claimed name, so a
+    /// hallucinated ticker (e.g. "AEM" described as a battery maker, but really
+    /// Agnico Eagle Mines) reveals its true identity.
+    pub verified_name: Option<String>,
+    /// `true` when the model's claimed company plainly contradicts the verified
+    /// registrant name for this ticker — a signal the ticker may be misattributed.
+    pub identity_mismatch: bool,
     pub price: Option<PriceData>,
     /// Which bottleneck (by title) this company is positioned to win.
     pub bottleneck: String,
