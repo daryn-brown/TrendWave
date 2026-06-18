@@ -1,0 +1,48 @@
+name: "CodeQL"
+
+# Static analysis for both the TypeScript frontend and the Rust backend. Rust is
+# analyzed with build-mode: none (GA on CodeQL 2.23.3+), so no compilation step
+# is required and the whole matrix runs on Linux.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 03:27 UTC — catches advisories published since the last push.
+    - cron: "27 3 * * 1"
+
+# Least privilege by default; each job opts into exactly what it needs.
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload analysis results.
+      security-events: write
+      # Required to fetch internal/private CodeQL packs.
+      packages: read
+      # Only required for workflows in private repositories.
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [javascript-typescript, rust]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          category: "/language:${{ matrix.language }}"
