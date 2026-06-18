@@ -73,6 +73,10 @@ pub struct Portfolio {
     pub as_of: String,
     /// Which MCP tools the data came from (provenance shown in the UI).
     pub tools_used: Vec<String>,
+    /// Best-effort notes about enrichment misses (keys/shapes only, never values),
+    /// surfaced subtly in the UI so an empty Value/Today column is explainable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug: Vec<String>,
 }
 
 impl Portfolio {
@@ -256,6 +260,31 @@ fn shape_of(v: &Value) -> String {
         Value::Null => "null".into(),
         _ => "scalar".into(),
     }
+}
+
+/// Reduce a diagnostic string to something safe to surface in the UI: every run
+/// of digits collapses to a single `#`, so no price, quantity, balance, or
+/// account number can survive even if an upstream error echoes a raw response
+/// body. Text (tickers, error reasons) is preserved; output is length-bounded.
+fn redact_nums(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_digits = false;
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                out.push('#');
+                in_digits = true;
+            }
+        } else {
+            out.push(ch);
+            in_digits = false;
+        }
+        if out.len() >= 160 {
+            out.push('…');
+            break;
+        }
+    }
+    out
 }
 
 /// Reduce a `tools/call` result to the JSON we can parse: prefer the typed
@@ -491,69 +520,137 @@ fn schema_has_prop(t: &ToolInfo, key: &str) -> bool {
         .is_some_and(|props| props.contains_key(key))
 }
 
-/// Parse a quotes payload into `ticker → quote`. Schema-tolerant about the price
-/// and previous-close key spellings; derives today's percent change when it isn't
-/// reported directly.
+/// Format the `symbols` argument the way a tool's schema expects it: most servers
+/// want an array of strings, some want a comma-separated string.
+fn symbols_value(t: &ToolInfo, symbols: &[String]) -> Value {
+    let wants_string = t
+        .input_schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(|p| p.get("symbols"))
+        .and_then(|s| s.get("type"))
+        .and_then(Value::as_str)
+        == Some("string");
+    if wants_string {
+        json!(symbols.join(","))
+    } else {
+        json!(symbols)
+    }
+}
+
+/// Extract a `Quote` (price + today's change) from one quote object.
+fn quote_fields(rec: &Value) -> Quote {
+    let price = num(
+        rec,
+        &[
+            "last_trade_price", "last_price", "last_extended_hours_trade_price",
+            "mark_price", "price", "ask_price",
+        ],
+    );
+    let prev_close = num(
+        rec,
+        &["previous_close", "adjusted_previous_close", "prev_close", "previousClose"],
+    );
+    let change_pct = num(
+        rec,
+        &["change_percent_today", "percent_change", "change_pct", "todays_change_pct"],
+    )
+    .or_else(|| match (price, prev_close) {
+        (Some(p), Some(pc)) if pc != 0.0 => Some((p - pc) / pc * 100.0),
+        _ => None,
+    });
+    Quote { price, change_pct }
+}
+
+/// Parse a quotes payload into `ticker → quote`. Handles a list/wrapper of quote
+/// objects *and* a `{ "AAPL": {…} }` symbol-keyed map, tolerant of key spellings.
 fn parse_quotes(v: &Value) -> HashMap<String, Quote> {
     let mut out = HashMap::new();
-    for rec in find_records(v) {
-        let Some(sym) = text(&rec, &["symbol", "ticker", "instrument_symbol"])
+    let records = find_records(v);
+    if records.is_empty() {
+        // Symbol-keyed map shape: keys are tickers, values are quote objects.
+        if let Some(map) = v.as_object() {
+            for (k, rec) in map {
+                let sym = k.to_ascii_uppercase();
+                if rec.is_object() && looks_like_ticker(&sym) {
+                    out.insert(sym, quote_fields(rec));
+                }
+            }
+        }
+        return out;
+    }
+    for rec in records {
+        if let Some(sym) = text(&rec, &["symbol", "ticker", "instrument_symbol"])
             .map(|s| s.to_ascii_uppercase())
             .filter(|s| looks_like_ticker(s))
-        else {
-            continue;
-        };
-        let price = num(
-            &rec,
-            &[
-                "last_trade_price", "last_price", "last_extended_hours_trade_price",
-                "mark_price", "price", "ask_price",
-            ],
-        );
-        let prev_close = num(
-            &rec,
-            &["previous_close", "adjusted_previous_close", "prev_close", "previousClose"],
-        );
-        let change_pct = num(
-            &rec,
-            &["change_percent_today", "percent_change", "change_pct", "todays_change_pct"],
-        )
-        .or_else(|| match (price, prev_close) {
-            (Some(p), Some(pc)) if pc != 0.0 => Some((p - pc) / pc * 100.0),
-            _ => None,
-        });
-        out.insert(sym, Quote { price, change_pct });
+        {
+            out.insert(sym, quote_fields(&rec));
+        }
     }
     out
 }
 
-/// Parse a historicals payload into `ticker → close-price series` (oldest→newest),
-/// trimmed to the most recent `SPARK_MAX_POINTS`.
-fn parse_historicals(v: &Value) -> HashMap<String, Vec<f64>> {
+/// Pull a close-price series out of one symbol's record (a bare array of points,
+/// or an object wrapping the points under a common key), trimmed to its tail.
+fn extract_series(v: &Value) -> Vec<f64> {
     const SERIES_KEYS: &[&str] =
         &["historicals", "data_points", "points", "history", "series", "candles", "results"];
+    let arr = if let Some(a) = v.as_array() {
+        a.clone()
+    } else {
+        SERIES_KEYS
+            .iter()
+            .find_map(|k| v.get(*k).and_then(Value::as_array))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut prices: Vec<f64> = arr
+        .iter()
+        .filter_map(|p| num(p, &["close_price", "close", "price", "last_trade_price", "open_price"]))
+        .collect();
+    if prices.len() > SPARK_MAX_POINTS {
+        prices = prices.split_off(prices.len() - SPARK_MAX_POINTS);
+    }
+    prices
+}
+
+/// Parse a historicals payload into `ticker → close-price series` (oldest→newest).
+/// Handles a `{ "AAPL": [...] }` symbol-keyed map as well as a list/wrapper of
+/// per-symbol records.
+fn parse_historicals(v: &Value) -> HashMap<String, Vec<f64>> {
     let mut out = HashMap::new();
+    // Symbol-keyed map: { "AAPL": [points…] } or { "AAPL": { historicals: [...] } }.
+    if let Some(map) = v.as_object() {
+        let keyed_by_symbol = !map.contains_key("results")
+            && !map.contains_key("symbol")
+            && map
+                .keys()
+                .any(|k| looks_like_ticker(&k.to_ascii_uppercase()));
+        if keyed_by_symbol {
+            for (k, val) in map {
+                let sym = k.to_ascii_uppercase();
+                if !looks_like_ticker(&sym) {
+                    continue;
+                }
+                let series = extract_series(val);
+                if !series.is_empty() {
+                    out.insert(sym, series);
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
     for rec in find_records(v) {
-        let Some(sym) = text(&rec, &["symbol", "ticker"])
+        if let Some(sym) = text(&rec, &["symbol", "ticker"])
             .map(|s| s.to_ascii_uppercase())
             .filter(|s| looks_like_ticker(s))
-        else {
-            continue;
-        };
-        let series = SERIES_KEYS
-            .iter()
-            .find_map(|k| rec.get(*k).and_then(Value::as_array))
-            .cloned()
-            .unwrap_or_default();
-        let mut prices: Vec<f64> = series
-            .iter()
-            .filter_map(|p| num(p, &["close_price", "close", "price", "last_trade_price", "open_price"]))
-            .collect();
-        if prices.len() > SPARK_MAX_POINTS {
-            prices = prices.split_off(prices.len() - SPARK_MAX_POINTS);
-        }
-        if !prices.is_empty() {
-            out.insert(sym, prices);
+        {
+            let series = extract_series(&rec);
+            if !series.is_empty() {
+                out.insert(sym, series);
+            }
         }
     }
     out
@@ -611,7 +708,7 @@ impl RobinhoodClient {
                             got = true;
                         }
                     }
-                    Err(e) => diagnostics.push(format!("{} errored: {e}", t.name)),
+                    Err(e) => diagnostics.push(format!("{} errored: {}", t.name, redact_nums(&e.to_string()))),
                 }
             }
             if got {
@@ -636,7 +733,7 @@ impl RobinhoodClient {
                             diagnostics.push(format!("{} → {}", t.name, shape_of(&val)));
                         }
                     }
-                    Err(e) => diagnostics.push(format!("{} errored: {e}", t.name)),
+                    Err(e) => diagnostics.push(format!("{} errored: {}", t.name, redact_nums(&e.to_string()))),
                 }
             }
             if used && !tools_used.contains(&t.name) {
@@ -671,14 +768,17 @@ impl RobinhoodClient {
 
         // Phase 4 — enrich held positions with a live value and a today sparkline.
         // Best-effort and read-only: any failure here leaves positions intact.
+        let mut debug: Vec<String> = Vec::new();
         let symbols: Vec<String> = positions
             .iter()
             .filter(|p| p.quantity > 0.0 && !p.ticker.is_empty())
             .map(|p| p.ticker.clone())
             .collect();
         if !symbols.is_empty() {
-            self.enrich_positions(&tools, &symbols, &mut positions, &mut tools_used)
+            let notes = self
+                .enrich_positions(&tools, &symbols, &mut positions, &mut tools_used)
                 .await;
+            debug.extend(notes);
         }
 
         Ok(Portfolio {
@@ -686,24 +786,32 @@ impl RobinhoodClient {
             account,
             as_of: chrono::Utc::now().to_rfc3339(),
             tools_used,
+            debug,
         })
     }
 
     /// Fill each held position's price/value and today's change from a read-only
     /// equity quote, and attach a recent intraday series for its sparkline from a
-    /// read-only historicals call. Entirely best-effort.
+    /// read-only historicals call. Entirely best-effort; returns short diagnostic
+    /// notes (keys/shapes only, never values) for any miss.
     async fn enrich_positions(
         &self,
         tools: &[ToolInfo],
         symbols: &[String],
         positions: &mut [Position],
         tools_used: &mut Vec<String>,
-    ) {
+    ) -> Vec<String> {
+        let mut debug = Vec::new();
+
         // Quotes → price, today's %, and a computed market value.
-        if let Some(t) = find_named(tools, &["equit", "quote"]) {
-            if let Ok(res) = self.mcp.call_tool(&t.name, json!({ "symbols": symbols })).await {
-                let quotes = parse_quotes(&tool_result_value(&res));
-                if !quotes.is_empty() {
+        match find_named(tools, &["equit", "quote"]) {
+            None => debug.push("no read-only equity-quote tool exposed".to_string()),
+            Some(t) => {
+                let quotes = self.fetch_quotes(t, symbols, &mut debug).await;
+                if quotes.is_empty() {
+                    debug.push(format!("{} returned no usable quotes", t.name));
+                } else {
+                    let mut matched = 0usize;
                     for p in positions.iter_mut() {
                         if let Some(q) = quotes.get(&p.ticker) {
                             if let Some(price) = q.price {
@@ -713,9 +821,15 @@ impl RobinhoodClient {
                                 }
                             }
                             p.change_pct = q.change_pct.or(p.change_pct);
+                            matched += 1;
                         }
                     }
-                    tools_used.push(t.name.clone());
+                    if matched > 0 {
+                        tools_used.push(t.name.clone());
+                    }
+                    if matched < symbols.len() {
+                        debug.push(format!("priced {}/{} holdings", matched, symbols.len()));
+                    }
                 }
             }
         }
@@ -725,33 +839,81 @@ impl RobinhoodClient {
         // after a holiday; the series is trimmed to its most-recent tail.
         if let Some(t) = find_named(tools, &["equit", "historical"]) {
             let mut args = serde_json::Map::new();
-            args.insert("symbols".into(), json!(symbols));
+            args.insert("symbols".into(), symbols_value(t, symbols));
             let start = chrono::Utc::now() - chrono::Duration::days(4);
-            args.insert("start_time".into(), json!(start.to_rfc3339()));
+            args.insert(
+                "start_time".into(),
+                json!(start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            );
             for (k, v) in [("interval", "5minute"), ("bounds", "regular"), ("span", "day")] {
                 if schema_has_prop(t, k) {
                     args.insert(k.into(), json!(v));
                 }
             }
-            if let Ok(res) = self.mcp.call_tool(&t.name, Value::Object(args)).await {
-                let series = parse_historicals(&tool_result_value(&res));
-                if !series.is_empty() {
-                    for p in positions.iter_mut() {
-                        if let Some(s) = series.get(&p.ticker) {
-                            p.spark = s.clone();
-                            if p.change_pct.is_none() {
-                                if let (Some(first), Some(last)) = (s.first(), s.last()) {
-                                    if *first != 0.0 {
-                                        p.change_pct = Some((last - first) / first * 100.0);
+            match self.mcp.call_tool(&t.name, Value::Object(args)).await {
+                Err(e) => debug.push(format!("{}: {}", t.name, redact_nums(&e.to_string()))),
+                Ok(res) => {
+                    let val = tool_result_value(&res);
+                    let series = parse_historicals(&val);
+                    if series.is_empty() {
+                        if !is_empty_payload(&val) {
+                            debug.push(format!("{} → {}", t.name, shape_of(&val)));
+                        }
+                    } else {
+                        for p in positions.iter_mut() {
+                            if let Some(s) = series.get(&p.ticker) {
+                                p.spark = s.clone();
+                                if p.change_pct.is_none() {
+                                    if let (Some(first), Some(last)) = (s.first(), s.last()) {
+                                        if *first != 0.0 {
+                                            p.change_pct = Some((last - first) / first * 100.0);
+                                        }
                                     }
                                 }
                             }
                         }
+                        tools_used.push(t.name.clone());
                     }
-                    tools_used.push(t.name.clone());
                 }
             }
         }
+
+        debug.truncate(8);
+        debug
+    }
+
+    /// Fetch quotes resiliently: one call for the whole batch, and on a *server
+    /// error* (often a single unrecognized symbol rejecting the request) retry in
+    /// small chunks so the rest of the holdings still price. Records the response
+    /// shape (keys only) when a well-formed reply simply doesn't parse.
+    async fn fetch_quotes(
+        &self,
+        t: &ToolInfo,
+        symbols: &[String],
+        debug: &mut Vec<String>,
+    ) -> HashMap<String, Quote> {
+        let mut out = HashMap::new();
+        match self.mcp.call_tool(&t.name, json!({ "symbols": symbols_value(t, symbols) })).await {
+            Ok(res) => {
+                let val = tool_result_value(&res);
+                let quotes = parse_quotes(&val);
+                if quotes.is_empty() && !is_empty_payload(&val) {
+                    debug.push(format!("{} → {}", t.name, shape_of(&val)));
+                }
+                out.extend(quotes);
+            }
+            Err(_) => {
+                // The whole batch was rejected. Retry in small chunks so one bad
+                // symbol only costs its chunk, not the entire portfolio.
+                for chunk in symbols.chunks(8) {
+                    match self.mcp.call_tool(&t.name, json!({ "symbols": symbols_value(t, chunk) })).await {
+                        Ok(res) => out.extend(parse_quotes(&tool_result_value(&res))),
+                        Err(e) => debug.push(format!("{} rejected [{}]: {}", t.name, chunk.join(","), redact_nums(&e.to_string()))),
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1002,6 +1164,22 @@ mod tests {
     }
 
     #[test]
+    fn redact_nums_strips_every_numeric_value_but_keeps_text() {
+        // A raw error body echoing prices/balances/account numbers must not
+        // survive into the UI-visible debug channel.
+        let raw = "Robinhood MCP returned 400: {\"last_price\":172.99,\"qty\":3,\"acct\":\"123456789\"}";
+        let safe = redact_nums(raw);
+        for leak in ["172.99", "172", "99", "123456789", "400"] {
+            assert!(!safe.contains(leak), "leaked {leak} in {safe}");
+        }
+        // Tickers and the textual reason are preserved.
+        let r2 = redact_nums("get_equity_quotes rejected [GEMI,AAPL]: invalid symbol GEMI");
+        assert!(r2.contains("GEMI") && r2.contains("invalid symbol"));
+        // Length-bounded.
+        assert!(redact_nums(&"x".repeat(500)).chars().count() <= 161);
+    }
+
+    #[test]
     fn merge_account_fills_missing_fields_across_tools() {
         let from_portfolio = AccountSummary {
             portfolio_value: Some(1000.0),
@@ -1112,5 +1290,49 @@ mod tests {
         };
         assert!(schema_has_prop(&t, "interval"));
         assert!(!schema_has_prop(&t, "bounds"));
+    }
+
+    #[test]
+    fn parse_quotes_handles_symbol_keyed_map() {
+        // Some servers return { "AAPL": {…}, "MSFT": {…} } rather than a list.
+        let v = json!({
+            "AAPL": { "last_trade_price": "200.0", "previous_close": "190.0" },
+            "MSFT": { "price": 400.0, "change_pct": 2.0 },
+        });
+        let q = parse_quotes(&v);
+        assert_eq!(q.get("AAPL").unwrap().price, Some(200.0));
+        assert_eq!(q.get("MSFT").unwrap().change_pct, Some(2.0));
+    }
+
+    #[test]
+    fn parse_historicals_handles_symbol_keyed_map() {
+        // Map of symbol → bare points array, and symbol → { historicals: [...] }.
+        let v = json!({
+            "AAPL": [{ "close_price": "10.0" }, { "close_price": "12.0" }],
+            "MSFT": { "historicals": [{ "close": 1.0 }, { "close": 2.0 }, { "close": 3.0 }] },
+        });
+        let h = parse_historicals(&v);
+        assert_eq!(h.get("AAPL").unwrap(), &vec![10.0, 12.0]);
+        assert_eq!(h.get("MSFT").unwrap(), &vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn symbols_value_respects_schema_type() {
+        let arr_tool = tool_requiring("get_equity_quotes", &["symbols"]);
+        let syms = vec!["AAPL".to_string(), "MSFT".to_string()];
+        // No explicit string type → array form.
+        assert_eq!(symbols_value(&arr_tool, &syms), json!(["AAPL", "MSFT"]));
+
+        // Schema says symbols is a string → comma-joined.
+        let str_tool = ToolInfo {
+            name: "get_equity_quotes".into(),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": { "symbols": { "type": "string" } },
+                "required": ["symbols"],
+            })),
+            annotations: None,
+        };
+        assert_eq!(symbols_value(&str_tool, &syms), json!("AAPL,MSFT"));
     }
 }
