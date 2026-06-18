@@ -26,6 +26,74 @@ use crate::model::{AccountSummary, Portfolio, Position};
 /// Robinhood's Agentic trading MCP endpoint (Streamable HTTP).
 pub const ENDPOINT: &str = "https://agent.robinhood.com/mcp/trading";
 
+/// Robinhood's public, unauthenticated instruments catalogue. Used only to check
+/// whether a ticker is a tradable Robinhood listing before offering it as a Buy
+/// destination — it sends just the ticker, no account data, and never trades.
+const INSTRUMENTS_URL: &str = "https://api.robinhood.com/instruments/";
+
+#[derive(serde::Deserialize)]
+struct InstrumentsResp {
+    #[serde(default)]
+    results: Vec<Instrument>,
+}
+
+#[derive(serde::Deserialize)]
+struct Instrument {
+    symbol: Option<String>,
+    tradeable: Option<bool>,
+    state: Option<String>,
+    tradability: Option<String>,
+}
+
+/// Whether `symbol` is an active, tradable Robinhood listing. Read-only lookup
+/// against the public instruments endpoint; requires no connected account. Errors
+/// (network/HTTP/parse) bubble up so the caller can decide to fail open.
+pub async fn symbol_available(http: &reqwest::Client, symbol: &str) -> AppResult<bool> {
+    let sym = symbol.trim().to_ascii_uppercase();
+    if sym.is_empty() {
+        return Ok(false);
+    }
+
+    let resp = http
+        .get(INSTRUMENTS_URL)
+        .query(&[("symbol", sym.as_str())])
+        .send()
+        .await
+        .map_err(|e| AppError::Robinhood(format!("instruments lookup failed: {e}")))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(AppError::Robinhood(format!(
+            "instruments lookup returned HTTP {status}"
+        )));
+    }
+
+    let body: InstrumentsResp = resp
+        .json()
+        .await
+        .map_err(|e| AppError::Robinhood(format!("malformed instruments response: {e}")))?;
+
+    Ok(body.results.iter().any(|i| {
+        let symbol_ok = i
+            .symbol
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case(&sym))
+            .unwrap_or(false);
+        let active = i
+            .state
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("active"))
+            .unwrap_or(false);
+        // `tradability` is the newer field; treat its absence as non-blocking.
+        let tradable = i.tradeable.unwrap_or(false)
+            && i.tradability
+                .as_deref()
+                .map(|t| t.eq_ignore_ascii_case("tradable"))
+                .unwrap_or(true);
+        symbol_ok && active && tradable
+    }))
+}
+
 /// Whether a tool is safe to call in read-only mode. Deny wins over allow.
 pub fn is_read_only_tool(name: &str) -> bool {
     let n = name.to_ascii_lowercase();

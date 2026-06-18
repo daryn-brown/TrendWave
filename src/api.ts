@@ -1,5 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  Listing,
+  ListingInfo,
   Portfolio,
   ProgressEvent,
   QuestradeStatus,
@@ -73,3 +75,19 @@ export const questradeConnect = (token: string) =>
 export const questradeDisconnect = () => invoke<void>("questrade_disconnect");
 
 export const questradePortfolio = () => invoke<Portfolio>("questrade_portfolio");
+
+// --- Buy routing (read-only listing lookups; never places orders) ----------
+
+// Resolves the US/base listing (with exchange) plus a same-security Canadian
+// interlisting when one exists, so the Buy panel can route each broker correctly.
+export const resolveListings = (symbol: string, company: string) =>
+  invoke<ListingInfo>("resolve_listings", { symbol, company });
+
+// Whether a ticker is an active, tradable Robinhood listing (public lookup).
+export const robinhoodSymbolAvailable = (symbol: string) =>
+  invoke<boolean>("robinhood_symbol_available", { symbol });
+
+// Best tradable Questrade listing for a ticker (prefers a CAD listing). Rejects
+// when Questrade isn't connected, so callers can fall back to the market heuristic.
+export const questradeFindListing = (symbol: string) =>
+  invoke<Listing | null>("questrade_find_listing", { symbol });

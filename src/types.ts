@@ -101,6 +101,20 @@ export interface ResearchResult {
   disclaimer: string;
 }
 
+// --- Buy routing (mirrors src-tauri/src/model.rs) --------------------------
+
+export interface Listing {
+  symbol: string;
+  exchange?: string | null;
+  currency?: string | null;
+}
+
+export interface ListingInfo {
+  us_symbol: string;
+  us_exchange?: string | null;
+  canadian?: Listing | null;
+}
+
 export type ProgressEvent =
   | { type: "stage"; stage: string; message: string }
   | { type: "bottlenecks"; items: Bottleneck[] }
