@@ -10,24 +10,27 @@ use tauri_plugin_opener::OpenerExt;
 use crate::biometric;
 use crate::db::{self, Watchlist};
 use crate::error::{AppError, AppResult};
-use crate::model::{ProgressEvent, ResearchResult};
+use crate::model::{Portfolio, ProgressEvent, ResearchResult};
 use crate::oauth;
 use crate::ollama::OllamaClient;
+use crate::questrade::{self, QuestradeClient};
 use crate::research;
-use crate::robinhood::{Portfolio, RobinhoodClient};
+use crate::robinhood::RobinhoodClient;
 use crate::settings::Settings;
 
 /// Shared application state managed by Tauri. The SQLite connection lives behind
 /// a `Mutex` (rusqlite's `Connection` is not `Sync`); we only ever hold the lock
 /// for short, synchronous queries and never across an `.await`. The HTTP client
 /// is internally ref-counted and cheap to clone for each async task. `robinhood`
-/// caches the last read-only portfolio snapshot so research can badge owned
-/// tickers without a network round-trip. `unlocked` tracks whether the user has
-/// passed the biometric gate this run (in-memory only, so it resets each launch).
+/// and `questrade` each cache the last read-only portfolio snapshot so research
+/// can badge owned tickers without a network round-trip. `unlocked` tracks
+/// whether the user has passed the biometric gate this run (in-memory only, so
+/// it resets each launch).
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub http: reqwest::Client,
     pub robinhood: Mutex<Option<Portfolio>>,
+    pub questrade: Mutex<Option<Portfolio>>,
     pub unlocked: AtomicBool,
 }
 
@@ -161,7 +164,7 @@ pub async fn robinhood_connect(
     // — unlock the session now and let the biometric gate apply on later launches.
     state.unlocked.store(true, Ordering::Relaxed);
 
-    let portfolio = fetch_and_cache(&state).await.ok();
+    let portfolio = robinhood_fetch_and_cache(&state).await.ok();
     Ok(RobinhoodStatus {
         connected: true,
         locked: false,
@@ -186,7 +189,7 @@ pub async fn robinhood_portfolio(state: State<'_, AppState>) -> AppResult<Portfo
     if state.portfolio_locked()? {
         return Err(AppError::Locked);
     }
-    fetch_and_cache(&state).await
+    robinhood_fetch_and_cache(&state).await
 }
 
 /// Whether this device supports a biometric / device-auth unlock prompt.
@@ -208,11 +211,73 @@ pub async fn biometric_unlock(state: State<'_, AppState>) -> AppResult<bool> {
 }
 
 /// Pull a read-only portfolio via the MCP client and cache it for enrichment.
-async fn fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
+async fn robinhood_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
     let token = oauth::ensure_access_token(&state.http).await?;
     let client = RobinhoodClient::new(state.http.clone(), token);
     let portfolio = client.fetch_portfolio().await?;
     if let Ok(mut guard) = state.robinhood.lock() {
+        *guard = Some(portfolio.clone());
+    }
+    Ok(portfolio)
+}
+
+/// Read-only Questrade connection status plus the last cached portfolio snapshot.
+#[derive(serde::Serialize)]
+pub struct QuestradeStatus {
+    pub connected: bool,
+    pub portfolio: Option<Portfolio>,
+}
+
+#[tauri::command]
+pub async fn questrade_status(state: State<'_, AppState>) -> AppResult<QuestradeStatus> {
+    let portfolio = state
+        .questrade
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    Ok(QuestradeStatus {
+        connected: questrade::is_connected(),
+        portfolio,
+    })
+}
+
+/// Connect Questrade with the manual authorization token from its API centre,
+/// then pull an initial read-only snapshot. Connecting succeeds even if the first
+/// snapshot fails.
+#[tauri::command]
+pub async fn questrade_connect(
+    state: State<'_, AppState>,
+    token: String,
+) -> AppResult<QuestradeStatus> {
+    questrade::connect(&state.http, &token).await?;
+    let portfolio = questrade_fetch_and_cache(&state).await.ok();
+    Ok(QuestradeStatus {
+        connected: true,
+        portfolio,
+    })
+}
+
+#[tauri::command]
+pub async fn questrade_disconnect(state: State<'_, AppState>) -> AppResult<()> {
+    questrade::clear_auth()?;
+    if let Ok(mut guard) = state.questrade.lock() {
+        *guard = None;
+    }
+    Ok(())
+}
+
+/// Force a fresh read-only portfolio fetch (refreshing the session if needed).
+#[tauri::command]
+pub async fn questrade_portfolio(state: State<'_, AppState>) -> AppResult<Portfolio> {
+    questrade_fetch_and_cache(&state).await
+}
+
+/// Pull a read-only portfolio via the Questrade REST client and cache it.
+async fn questrade_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
+    let (access_token, api_server) = questrade::ensure_session(&state.http).await?;
+    let client = QuestradeClient::new(state.http.clone(), access_token, api_server);
+    let portfolio = client.fetch_portfolio().await?;
+    if let Ok(mut guard) = state.questrade.lock() {
         *guard = Some(portfolio.clone());
     }
     Ok(portfolio)
@@ -253,15 +318,15 @@ async fn execute(
         let _ = on_event.send(event);
     };
 
-    // Read-only Robinhood enrichment: badge picks the user already holds. Pulled
-    // from the last cached snapshot so a research run never blocks on the broker.
-    let owned: BTreeSet<String> = state
-        .robinhood
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .map(|p| p.owned_tickers())
-        .unwrap_or_default();
+    // Read-only portfolio enrichment: badge picks the user already holds in
+    // either connected broker. Pulled from the last cached snapshots so a
+    // research run never blocks on a broker.
+    let mut owned: BTreeSet<String> = BTreeSet::new();
+    for cache in [&state.robinhood, &state.questrade] {
+        if let Some(p) = cache.lock().ok().and_then(|guard| guard.clone()) {
+            owned.extend(p.owned_tickers());
+        }
+    }
 
     match research::run_research(&ollama, &state.http, &settings, prompt, &owned, &emit).await {
         Ok(result) => Ok(result),
