@@ -38,6 +38,12 @@ const KEYRING_ACCOUNT: &str = "questrade-api";
 /// Refresh a little before the access token actually expires to avoid races.
 const EXPIRY_SLACK_SECS: i64 = 30;
 
+/// Questrade's login server returns sporadic 5xx responses for tokens that are
+/// actually fine, so retry a few times before giving up — most blips clear on
+/// the second try.
+const EXCHANGE_MAX_ATTEMPTS: u32 = 3;
+const EXCHANGE_RETRY_BACKOFF_MS: u64 = 500;
+
 /// Most intraday points we keep for a row's sparkline (newest retained).
 const SPARK_MAX_POINTS: usize = 48;
 
@@ -89,8 +95,11 @@ struct TokenResponse {
 /// transient network blip is surfaced as a plain error (and doesn't wrongly tell
 /// the user their connection is gone).
 enum ExchangeError {
-    /// The login server rejected the refresh token (expired / already used).
+    /// The login server rejected the refresh token with a 4xx (expired / already used).
     Rejected,
+    /// The login server returned persistent 5xx responses. Questrade does this both
+    /// for genuinely bad tokens (a known quirk) and during real outages.
+    ServerError,
     /// Network or parsing failure talking to the login server.
     Transport(String),
 }
@@ -137,46 +146,79 @@ pub fn is_connected() -> bool {
 /// rotated refresh token). Used both for the initial manual-token connect and
 /// for transparent refresh.
 async fn exchange(http: &reqwest::Client, refresh_token: &str) -> Result<StoredAuth, ExchangeError> {
-    let resp = http
-        .get(TOKEN_URL)
-        .query(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-        ])
-        .send()
-        .await
-        .map_err(|e| ExchangeError::Transport(format!("token request failed: {e}")))?;
+    let mut last_transport: Option<String> = None;
+    let mut saw_server_error = false;
 
-    let status = resp.status();
-    if !status.is_success() {
-        // A 4xx means the token itself was refused; anything else is transient.
-        return Err(if status.is_client_error() {
-            ExchangeError::Rejected
-        } else {
-            ExchangeError::Transport(format!("token endpoint returned HTTP {status}"))
+    for attempt in 0..EXCHANGE_MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                EXCHANGE_RETRY_BACKOFF_MS * attempt as u64,
+            ))
+            .await;
+        }
+
+        let resp = match http
+            .get(TOKEN_URL)
+            .query(&[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+            ])
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Network blip — worth another try.
+                last_transport = Some(format!("token request failed: {e}"));
+                continue;
+            }
+        };
+
+        let status = resp.status();
+
+        // A 4xx means the token itself was refused; retrying won't help.
+        if status.is_client_error() {
+            return Err(ExchangeError::Rejected);
+        }
+
+        if !status.is_success() {
+            // 5xx (Questrade's flaky auth server, or its quirky response to a
+            // bad token): remember it and retry.
+            saw_server_error = true;
+            continue;
+        }
+
+        let token: TokenResponse = resp
+            .json()
+            .await
+            .map_err(|e| ExchangeError::Transport(format!("malformed token response: {e}")))?;
+
+        let api_server = token
+            .api_server
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ExchangeError::Transport("token response had no api_server".into()))?;
+
+        return Ok(StoredAuth {
+            access_token: token.access_token,
+            api_server,
+            // Reuse the previous refresh token only if the server somehow omitted a
+            // new one (it normally rotates every time).
+            refresh_token: token
+                .refresh_token
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| refresh_token.to_string()),
+            expires_at: token.expires_in.map(|s| now_secs() + s),
         });
     }
 
-    let token: TokenResponse = resp
-        .json()
-        .await
-        .map_err(|e| ExchangeError::Transport(format!("malformed token response: {e}")))?;
-
-    let api_server = token
-        .api_server
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| ExchangeError::Transport("token response had no api_server".into()))?;
-
-    Ok(StoredAuth {
-        access_token: token.access_token,
-        api_server,
-        // Reuse the previous refresh token only if the server somehow omitted a
-        // new one (it normally rotates every time).
-        refresh_token: token
-            .refresh_token
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| refresh_token.to_string()),
-        expires_at: token.expires_in.map(|s| now_secs() + s),
+    // Every attempt failed. A 5xx somewhere along the way is the more actionable
+    // signal, so prefer it over a bare network error.
+    Err(if saw_server_error {
+        ExchangeError::ServerError
+    } else {
+        ExchangeError::Transport(
+            last_transport.unwrap_or_else(|| "could not reach Questrade's login server".into()),
+        )
     })
 }
 
@@ -196,7 +238,14 @@ pub async fn connect(http: &reqwest::Client, manual_token: &str) -> AppResult<St
         }
         Err(ExchangeError::Rejected) => Err(AppError::Questrade(
             "Authorization failed — the token may be invalid, expired, or already used. \
-             Generate a new manual token in Questrade's API centre and try again."
+             Each manual token works only once, so generate a fresh one in Questrade's API \
+             centre and paste it right away."
+                .into(),
+        )),
+        Err(ExchangeError::ServerError) => Err(AppError::Questrade(
+            "Questrade's login server rejected this token (HTTP 500). Manual tokens are \
+             single-use and short-lived — generate a new token in Questrade's API centre and \
+             paste it immediately. If it keeps failing, Questrade's API may be briefly down."
                 .into(),
         )),
         Err(ExchangeError::Transport(msg)) => Err(AppError::Questrade(msg)),
@@ -217,6 +266,11 @@ pub async fn ensure_session(http: &reqwest::Client) -> AppResult<(String, String
             Ok((refreshed.access_token, refreshed.api_server))
         }
         Err(ExchangeError::Rejected) => Err(AppError::QuestradeNotConnected),
+        Err(ExchangeError::ServerError) => Err(AppError::Questrade(
+            "Questrade's login server is returning errors (HTTP 500). This is usually \
+             temporary — please try again in a moment."
+                .into(),
+        )),
         Err(ExchangeError::Transport(msg)) => Err(AppError::Questrade(msg)),
     }
 }
