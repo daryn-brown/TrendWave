@@ -71,6 +71,9 @@ pub fn run() {
             commands::questrade_connect,
             commands::questrade_disconnect,
             commands::questrade_portfolio,
+            commands::resolve_listings,
+            commands::robinhood_symbol_available,
+            commands::questrade_find_listing,
         ])
         .run(tauri::generate_context!());
 

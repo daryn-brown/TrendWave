@@ -2,7 +2,7 @@ use feed_rs::parser;
 use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
-use crate::model::{NewsItem, PriceData};
+use crate::model::{Listing, ListingInfo, NewsItem, PriceData};
 
 const CHART_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart/";
 const SEARCH_URL: &str = "https://query1.finance.yahoo.com/v1/finance/search";
@@ -138,6 +138,15 @@ struct SearchEnvelope {
 #[derive(Deserialize)]
 struct SearchQuote {
     symbol: Option<String>,
+    #[serde(rename = "shortname")]
+    short_name: Option<String>,
+    #[serde(rename = "longname")]
+    long_name: Option<String>,
+    exchange: Option<String>,
+    #[serde(rename = "exchDisp")]
+    exch_disp: Option<String>,
+    #[serde(rename = "quoteType")]
+    quote_type: Option<String>,
 }
 
 /// Resolve a company name to its most likely ticker. Used as a fallback when
@@ -156,6 +165,125 @@ pub async fn resolve_symbol(http: &reqwest::Client, company: &str) -> AppResult<
         .into_iter()
         .find_map(|q| q.symbol)
         .ok_or_else(|| AppError::EmptyFeed(format!("no symbol match for {company}")))
+}
+
+/// Whether a Yahoo symbol is a Canadian listing (TSX `.TO`, TSXV `.V`,
+/// Cboe Canada/NEO `.NE`, CSE `.CN`).
+fn is_canadian_symbol(sym: &str) -> bool {
+    let s = sym.to_ascii_uppercase();
+    s.ends_with(".TO") || s.ends_with(".V") || s.ends_with(".NE") || s.ends_with(".CN")
+}
+
+/// The root ticker before any exchange suffix (`SHOP.TO` -> `SHOP`).
+fn symbol_root(sym: &str) -> &str {
+    sym.split('.').next().unwrap_or(sym)
+}
+
+/// Normalize a company name for conservative same-security matching: lowercased,
+/// punctuation removed, and common corporate/structure tokens dropped so
+/// "Shopify Inc." and "Shopify" compare equal.
+fn normalize_company(name: &str) -> String {
+    const STOP: &[&str] = &[
+        "inc", "incorporated", "corp", "corporation", "ltd", "limited", "plc", "co",
+        "company", "the", "holdings", "holding", "group", "sa", "nv", "ag", "class",
+        "cls", "common", "stock", "shares", "a", "b",
+    ];
+    name.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .filter(|w| !STOP.contains(w))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// True when two company names match strongly enough to treat two listings as the
+/// same security (exact normalized equality, or one is a prefix of the other).
+fn names_match(a: &str, b: &str) -> bool {
+    let (a, b) = (normalize_company(a), normalize_company(b));
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    a == b || a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// Pick the best same-security Canadian interlisting from Yahoo search results.
+/// Conservative on purpose: only accepts a Canadian-listed *equity* whose root
+/// ticker matches the US symbol or whose name strongly matches the company.
+fn best_canadian_listing(quotes: &[SearchQuote], us_symbol: &str, company: &str) -> Option<Listing> {
+    let mut matches: Vec<&SearchQuote> = quotes
+        .iter()
+        .filter(|q| {
+            q.quote_type
+                .as_deref()
+                .map(|t| t.eq_ignore_ascii_case("EQUITY"))
+                .unwrap_or(false)
+        })
+        .filter(|q| q.symbol.as_deref().map(is_canadian_symbol).unwrap_or(false))
+        .filter(|q| {
+            let sym = q.symbol.as_deref().unwrap_or("");
+            let root_match = symbol_root(sym).eq_ignore_ascii_case(us_symbol);
+            let name = q.long_name.as_deref().or(q.short_name.as_deref()).unwrap_or("");
+            root_match || names_match(name, company)
+        })
+        .collect();
+
+    // Prefer a matching root, then TSX (`.TO`) over the other Canadian venues.
+    matches.sort_by_key(|q| {
+        let sym = q.symbol.as_deref().unwrap_or("").to_ascii_uppercase();
+        let root_match = !symbol_root(&sym).eq_ignore_ascii_case(us_symbol);
+        let not_tsx = !sym.ends_with(".TO");
+        (root_match, not_tsx)
+    });
+
+    matches.first().map(|q| Listing {
+        symbol: q.symbol.clone().unwrap_or_default(),
+        exchange: q.exch_disp.clone().or_else(|| q.exchange.clone()),
+        currency: Some("CAD".to_string()),
+    })
+}
+
+/// Resolve the listings the Buy action needs for a pick: the US/base symbol with
+/// its exchange (for brokers whose deep-link needs an exchange prefix) and a
+/// same-security Canadian interlisting when one exists (so Canadian brokers can
+/// trade it in CAD without an FX conversion). Best-effort via Yahoo search.
+pub async fn resolve_listings(
+    http: &reqwest::Client,
+    symbol: &str,
+    company: &str,
+) -> AppResult<ListingInfo> {
+    let us_symbol = symbol_root(symbol.trim()).to_ascii_uppercase();
+    // Searching by company name surfaces cross-listings (e.g. SHOP and SHOP.TO);
+    // fall back to the symbol when no company name is available.
+    let query = if company.trim().is_empty() { us_symbol.as_str() } else { company.trim() };
+
+    let envelope: SearchEnvelope = http
+        .get(SEARCH_URL)
+        .query(&[("q", query), ("quotesCount", "15"), ("newsCount", "0")])
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let us_exchange = envelope
+        .quotes
+        .iter()
+        .find(|q| {
+            q.symbol
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case(&us_symbol))
+                .unwrap_or(false)
+        })
+        .and_then(|q| q.exch_disp.clone().or_else(|| q.exchange.clone()));
+
+    let canadian = best_canadian_listing(&envelope.quotes, &us_symbol, company);
+
+    Ok(ListingInfo {
+        us_symbol,
+        us_exchange,
+        canadian,
+    })
 }
 
 // ---- News -------------------------------------------------------------------
@@ -218,5 +346,54 @@ mod tests {
         let (price, currency) = to_major_units(150.0, "USD");
         assert!((price - 150.0).abs() < 1e-9);
         assert_eq!(currency, "USD");
+    }
+
+    fn quote(symbol: &str, name: &str, quote_type: &str) -> SearchQuote {
+        SearchQuote {
+            symbol: Some(symbol.to_string()),
+            short_name: Some(name.to_string()),
+            long_name: Some(name.to_string()),
+            exchange: None,
+            exch_disp: Some("Toronto".to_string()),
+            quote_type: Some(quote_type.to_string()),
+        }
+    }
+
+    #[test]
+    fn finds_interlisted_canadian_share_by_root() {
+        let quotes = vec![
+            quote("SHOP", "Shopify Inc.", "EQUITY"),
+            quote("SHOP.TO", "Shopify Inc.", "EQUITY"),
+        ];
+        let found = best_canadian_listing(&quotes, "SHOP", "Shopify Inc.").unwrap();
+        assert_eq!(found.symbol, "SHOP.TO");
+        assert_eq!(found.currency.as_deref(), Some("CAD"));
+    }
+
+    #[test]
+    fn matches_interlisting_by_company_name_when_root_differs() {
+        // Barrick trades as GOLD on NYSE but ABX on the TSX.
+        let quotes = vec![quote("ABX.TO", "Barrick Gold Corporation", "EQUITY")];
+        let found = best_canadian_listing(&quotes, "GOLD", "Barrick Gold").unwrap();
+        assert_eq!(found.symbol, "ABX.TO");
+    }
+
+    #[test]
+    fn ignores_unrelated_canadian_listings() {
+        let quotes = vec![
+            quote("RY.TO", "Royal Bank of Canada", "EQUITY"),
+            quote("ETF.TO", "Some Index Fund", "ETF"),
+        ];
+        assert!(best_canadian_listing(&quotes, "AAPL", "Apple Inc.").is_none());
+    }
+
+    #[test]
+    fn prefers_tsx_over_other_canadian_venues() {
+        let quotes = vec![
+            quote("SHOP.NE", "Shopify Inc.", "EQUITY"),
+            quote("SHOP.TO", "Shopify Inc.", "EQUITY"),
+        ];
+        let found = best_canadian_listing(&quotes, "SHOP", "Shopify Inc.").unwrap();
+        assert_eq!(found.symbol, "SHOP.TO");
     }
 }

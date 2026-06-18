@@ -1,5 +1,13 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import {
+  resolveBuyOptions,
+  hasAnyBroker,
+  lastBroker,
+  rememberBroker,
+  type BuyOption,
+  type BrokerId,
+} from "./brokers";
 import type {
   AppErrorShape,
   Bottleneck,
@@ -55,6 +63,11 @@ export const IconAlert = ({ className = base }: IconProps) => (
 export const IconExternal = ({ className = base }: IconProps) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+  </svg>
+);
+export const IconCart = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 3h2l2.4 12.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.6L21 7H6M9 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm8 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2z" />
   </svg>
 );
 export const IconClose = ({ className = base }: IconProps) => (
@@ -356,7 +369,13 @@ function NewsLink({ url, children }: { url: string; children: ReactNode }) {
   );
 }
 
-export function CandidateCard({ candidate }: { candidate: Candidate }) {
+export function CandidateCard({
+  candidate,
+  questradeConnected = false,
+}: {
+  candidate: Candidate;
+  questradeConnected?: boolean;
+}) {
   const [showNews, setShowNews] = useState(false);
   const senti = sentimentLabel(candidate.sentiment);
   const price = candidate.price;
@@ -475,7 +494,146 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
           )}
         </div>
       )}
+
+      <BuyPanel candidate={candidate} questradeConnected={questradeConnected} />
     </article>
+  );
+}
+
+function buyOptionLabel(o: BuyOption): string {
+  if (o.fxNote === "cad-native") return `${o.label} · ${o.symbol} (CAD, no FX)`;
+  if (o.fxNote === "usd-fx") return `${o.label} · ${o.symbol} (USD, FX applies)`;
+  return `${o.label} · ${o.symbol}`;
+}
+
+function BuyPanel({
+  candidate,
+  questradeConnected,
+}: {
+  candidate: Candidate;
+  questradeConnected: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [options, setOptions] = useState<BuyOption[] | null>(null);
+  const [qty, setQty] = useState(1);
+  const [brokerId, setBrokerId] = useState<BrokerId | null>(null);
+
+  if (!hasAnyBroker(candidate.ticker, candidate.price)) return null;
+
+  const price = candidate.price;
+
+  const onToggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next && options === null && !loading) {
+      setLoading(true);
+      resolveBuyOptions(candidate, questradeConnected)
+        .then((opts) => {
+          setOptions(opts);
+          const preferred = lastBroker();
+          const initial = opts.find((o) => o.id === preferred) ?? opts[0] ?? null;
+          setBrokerId(initial ? initial.id : null);
+        })
+        .finally(() => setLoading(false));
+    }
+  };
+
+  const selected = options?.find((o) => o.id === brokerId) ?? null;
+  const estCost = price && qty > 0 ? qty * price.price : null;
+
+  const onOpenBroker = () => {
+    if (!selected) return;
+    rememberBroker(selected.id);
+    void openUrl(selected.url).catch(() => {});
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-800">
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-full bg-sky-600 px-3.5 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 dark:bg-sky-500 dark:hover:bg-sky-400"
+      >
+        <IconCart className="h-3.5 w-3.5" />
+        {open ? "Hide buy options" : "Buy"}
+      </button>
+
+      {open && (
+        <div className="mt-3 rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200 dark:bg-slate-800/40 dark:ring-slate-700">
+          {loading ? (
+            <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <IconSpinner className="h-4 w-4 text-sky-500" />
+              Checking availability…
+            </div>
+          ) : !options || options.length === 0 ? (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Not available at a supported brokerage.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Quantity</span>
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={qty}
+                    onChange={(e) => {
+                      const n = Math.floor(Number(e.target.value));
+                      setQty(Number.isFinite(n) && n > 0 ? n : 1);
+                    }}
+                    className="w-24 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-sky-500/30"
+                  />
+                </label>
+                <label className="flex min-w-[12rem] flex-1 flex-col gap-1">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500">Brokerage</span>
+                  <select
+                    value={brokerId ?? ""}
+                    onChange={(e) => setBrokerId(e.target.value as BrokerId)}
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-sm text-slate-900 focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-sky-500/30"
+                  >
+                    {options.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {buyOptionLabel(o)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {estCost != null && price && (
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Estimated cost ≈{" "}
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">{formatPrice(estCost, price.currency)}</span>{" "}
+                  ({qty} × {formatPrice(price.price, price.currency)})
+                  {selected?.fxNote === "cad-native" && price.currency !== "CAD" && (
+                    <> — trades in CAD, FX-free; final CAD cost set at the market.</>
+                  )}
+                  {selected?.fxNote === "usd-fx" && <> — trades in USD; your broker applies FX.</>}
+                </p>
+              )}
+
+              <button
+                onClick={onOpenBroker}
+                disabled={!selected}
+                className="inline-flex items-center gap-1.5 rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 dark:bg-white dark:text-slate-900 dark:hover:bg-slate-200"
+              >
+                <IconExternal className="h-3.5 w-3.5" />
+                Open in {selected?.label ?? "broker"}
+              </button>
+
+              <p className="text-[11px] leading-5 text-slate-400 dark:text-slate-500">
+                Opens {selected?.label ?? "the broker"}’s page for {selected?.symbol ?? candidate.ticker} in your
+                browser so you can review and place the order there — enter the quantity to confirm. Some brokers
+                require sign-in. TrendWave never places trades. Not financial advice.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

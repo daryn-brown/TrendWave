@@ -10,12 +10,13 @@ use tauri_plugin_opener::OpenerExt;
 use crate::biometric;
 use crate::db::{self, Watchlist};
 use crate::error::{AppError, AppResult};
-use crate::model::{Portfolio, ProgressEvent, ResearchResult};
+use crate::feeds;
+use crate::model::{Listing, ListingInfo, Portfolio, ProgressEvent, ResearchResult};
 use crate::oauth;
 use crate::ollama::OllamaClient;
 use crate::questrade::{self, QuestradeClient};
 use crate::research;
-use crate::robinhood::RobinhoodClient;
+use crate::robinhood::{self, RobinhoodClient};
 use crate::settings::Settings;
 
 /// Shared application state managed by Tauri. The SQLite connection lives behind
@@ -281,6 +282,47 @@ async fn questrade_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
         *guard = Some(portfolio.clone());
     }
     Ok(portfolio)
+}
+
+// --- Buy routing (read-only: resolve listings, never place orders) ----------
+
+/// Resolve the listings a Buy action needs for a pick: the US/base symbol with
+/// its exchange and, when one exists, a same-security Canadian interlisting so
+/// Canadian brokers can trade it in CAD without an FX conversion.
+#[tauri::command]
+pub async fn resolve_listings(
+    state: State<'_, AppState>,
+    symbol: String,
+    company: String,
+) -> AppResult<ListingInfo> {
+    feeds::resolve_listings(&state.http, &symbol, &company).await
+}
+
+/// Whether a ticker is an active, tradable Robinhood listing (public lookup, no
+/// connected account required). Lets the UI hide Robinhood for symbols it can't
+/// trade rather than deep-linking to a dead page.
+#[tauri::command]
+pub async fn robinhood_symbol_available(
+    state: State<'_, AppState>,
+    symbol: String,
+) -> AppResult<bool> {
+    robinhood::symbol_available(&state.http, &symbol).await
+}
+
+/// Find the best tradable Questrade listing for a ticker, preferring a Canadian
+/// (CAD) listing of the same security. Errors when Questrade isn't connected so
+/// the frontend can fall back to its market-based heuristic.
+#[tauri::command]
+pub async fn questrade_find_listing(
+    state: State<'_, AppState>,
+    symbol: String,
+) -> AppResult<Option<Listing>> {
+    if !questrade::is_connected() {
+        return Err(AppError::QuestradeNotConnected);
+    }
+    let (access_token, api_server) = questrade::ensure_session(&state.http).await?;
+    let client = QuestradeClient::new(state.http.clone(), access_token, api_server);
+    client.find_listing(&symbol).await
 }
 
 /// Shared body for both the ad-hoc prompt and watchlist re-runs: load settings,
