@@ -46,11 +46,10 @@ pub async fn fetch_growth(
     http: &reqwest::Client,
     ticker: &str,
     yahoo: Option<&YahooEnrich>,
-    price: Option<f64>,
 ) -> Option<GrowthData> {
     let edgar = edgar_growth(http, ticker).await;
     let yahoo_metrics = match yahoo {
-        Some(y) => y.fetch(ticker, price).await,
+        Some(y) => y.fetch(ticker).await,
         None => None,
     };
     build_growth(edgar, yahoo_metrics)
@@ -368,6 +367,24 @@ fn cagr(series: &[(i32, f64)]) -> Option<f64> {
 
 // ---- Yahoo enrichment (opportunistic) ---------------------------------------
 
+/// Quote-currency subunit factor. Yahoo quotes London (pence "GBp"),
+/// Johannesburg (cents "ZAc") and Tel Aviv (agorot "ILA") in 1/100 of the major
+/// unit while reporting EPS in the major unit — which inflates its P/E ~100x.
+fn subunit_factor(currency: &str) -> f64 {
+    match currency {
+        "GBp" | "GBX" | "ZAc" | "ZAX" | "ILA" | "ILa" => 100.0,
+        _ => 1.0,
+    }
+}
+
+/// Rescale Yahoo's forward P/E by the quote subunit, then drop values that are
+/// non-positive or implausibly large — those are data errors, not real
+/// multiples, and showing them is worse than showing nothing.
+fn sane_forward_pe(pe: f64, subunit: f64) -> Option<f64> {
+    let pe = pe / subunit;
+    (pe > 0.0 && pe < 250.0).then_some(pe)
+}
+
 pub struct YahooMetrics {
     pub forward_pe: Option<f64>,
     pub analyst_upside: Option<f64>,
@@ -415,14 +432,14 @@ impl YahooEnrich {
         Some(Self { client, crumb })
     }
 
-    async fn fetch(&self, symbol: &str, price: Option<f64>) -> Option<YahooMetrics> {
+    async fn fetch(&self, symbol: &str) -> Option<YahooMetrics> {
         let value: serde_json::Value = self
             .client
             .get(format!(
                 "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
             ))
             .query(&[
-                ("modules", "financialData,defaultKeyStatistics"),
+                ("modules", "financialData,defaultKeyStatistics,price"),
                 ("crumb", self.crumb.as_str()),
             ])
             .send()
@@ -437,14 +454,25 @@ impl YahooEnrich {
         let stats = &node["defaultKeyStatistics"];
         let raw = |v: &serde_json::Value| v.get("raw").and_then(serde_json::Value::as_f64);
 
+        // London/JSE/TASE names are quoted in a subunit but report EPS in the
+        // major unit, so Yahoo's P/E for them is inflated ~100x. Detect the
+        // subunit from the quote currency and rescale, then guard the result.
+        let quote_currency = node["price"]["currency"].as_str().unwrap_or("");
+        let subunit = subunit_factor(quote_currency);
+        let forward_pe = raw(&stats["forwardPE"]).and_then(|pe| sane_forward_pe(pe, subunit));
+
+        // Derive analyst upside entirely within Yahoo's own quote units (current
+        // price vs target are the same currency), so it is immune to subunit
+        // scaling and to whatever units the caller's price was in.
+        let current = raw(&financial["currentPrice"]);
         let target = raw(&financial["targetMeanPrice"]);
-        let analyst_upside = match (target, price) {
-            (Some(t), Some(p)) if p > 0.0 => Some((t - p) / p),
+        let analyst_upside = match (target, current) {
+            (Some(t), Some(c)) if c > 0.0 => Some((t - c) / c),
             _ => None,
         };
 
         Some(YahooMetrics {
-            forward_pe: raw(&stats["forwardPE"]),
+            forward_pe,
             analyst_upside,
             revenue_growth: raw(&financial["revenueGrowth"]),
             earnings_growth: raw(&financial["earningsGrowth"]),
@@ -566,5 +594,20 @@ mod tests {
         .unwrap();
         assert_eq!(edgar_only.source, "SEC EDGAR");
         assert!(build_growth(None, None).is_none());
+    }
+
+    #[test]
+    fn forward_pe_rescaled_for_pence_quotes() {
+        // Yahoo's inflated 1124.4 for a London pence quote is really ~11.2.
+        let pe = sane_forward_pe(1124.4, subunit_factor("GBp")).unwrap();
+        assert!((pe - 11.244).abs() < 1e-3);
+    }
+
+    #[test]
+    fn forward_pe_rejects_implausible_and_keeps_normal() {
+        assert!(sane_forward_pe(1124.4, 1.0).is_none()); // uncorrected garbage
+        assert!(sane_forward_pe(-3.0, 1.0).is_none()); // negative
+        assert_eq!(sane_forward_pe(22.5, 1.0), Some(22.5)); // ordinary multiple
+        assert_eq!(subunit_factor("USD"), 1.0);
     }
 }

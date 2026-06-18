@@ -242,12 +242,11 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         for (idx, w) in working.iter().enumerate() {
             let http = http.clone();
             let ticker = w.candidate.ticker.clone();
-            let price = w.candidate.price.as_ref().map(|p| p.price);
             let yahoo = yahoo.clone();
             let limit = limit.clone();
             set.spawn(async move {
                 let _permit = limit.acquire_owned().await.ok();
-                let growth = fundamentals::fetch_growth(&http, &ticker, yahoo.as_ref(), price).await;
+                let growth = fundamentals::fetch_growth(&http, &ticker, yahoo.as_ref()).await;
                 (idx, growth)
             });
         }
