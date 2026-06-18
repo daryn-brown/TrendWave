@@ -244,21 +244,46 @@ fn describe_tool(t: &ToolInfo) -> String {
 /// Describe the *shape* of a tool response — its keys only, never its values —
 /// so a parsing miss can be diagnosed without leaking holdings or balances.
 fn shape_of(v: &Value) -> String {
+    shape_of_depth(v, 2)
+}
+
+/// Structural description of a JSON value to `depth` levels: object keys, array
+/// lengths, and scalar kinds only — never any value. Objects are capped to a
+/// handful of keys so the string stays bounded.
+fn shape_of_depth(v: &Value, depth: u8) -> String {
     match v {
-        Value::Object(map) => {
-            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
-            format!("object{{{}}}", keys.join(","))
-        }
-        Value::Array(arr) => match arr.first() {
-            Some(Value::Object(first)) => {
-                let keys: Vec<&str> = first.keys().map(String::as_str).collect();
-                format!("array[{}] of object{{{}}}", arr.len(), keys.join(","))
+        Value::Object(map) if depth > 0 => {
+            let mut parts: Vec<String> = map
+                .iter()
+                .take(10)
+                .map(|(k, val)| format!("{k}:{}", shape_of_depth(val, depth - 1)))
+                .collect();
+            if map.len() > 10 {
+                parts.push("…".into());
             }
+            format!("object{{{}}}", parts.join(","))
+        }
+        Value::Object(map) => format!("object{{{}}}", map.keys().take(10).cloned().collect::<Vec<_>>().join(",")),
+        Value::Array(arr) => match arr.first() {
+            Some(first) if depth > 0 => format!("array[{}] of {}", arr.len(), shape_of_depth(first, depth - 1)),
             _ => format!("array[{}]", arr.len()),
         },
         Value::String(_) => "string".into(),
         Value::Null => "null".into(),
         _ => "scalar".into(),
+    }
+}
+
+/// Like `shape_of`, but for a *string* payload it appends a short, number-redacted
+/// preview so an unrecognized text format (CSV, NDJSON, …) can be identified
+/// without leaking any price, quantity, or balance.
+fn shape_preview(v: &Value) -> String {
+    match v {
+        Value::String(s) => {
+            let head: String = s.trim().chars().take(140).collect();
+            format!("string «{}»", redact_nums(&head))
+        }
+        _ => shape_of(v),
     }
 }
 
@@ -293,7 +318,7 @@ fn redact_nums(s: &str) -> String {
 fn tool_result_value(result: &Value) -> Value {
     if let Some(sc) = result.get("structuredContent") {
         if !sc.is_null() {
-            return sc.clone();
+            return reparse_json_string(sc);
         }
     }
     if let Some(items) = result.get("content").and_then(Value::as_array) {
@@ -313,6 +338,48 @@ fn tool_result_value(result: &Value) -> Value {
         }
     }
     result.clone()
+}
+
+/// Some servers return JSON as a *string* (a stringified array/object) under
+/// `structuredContent`. If `v` is such a string, decode it; otherwise return it
+/// unchanged.
+fn reparse_json_string(v: &Value) -> Value {
+    if let Some(s) = v.as_str() {
+        let t = s.trim();
+        if t.starts_with('{') || t.starts_with('[') {
+            if let Ok(parsed) = serde_json::from_str::<Value>(t) {
+                return parsed;
+            }
+        }
+    }
+    v.clone()
+}
+
+/// Descend through a wrapper envelope like `{ "data": … }` or `{ "results": … }`
+/// to the object/array that actually holds the records, so a `{data, guide}`-style
+/// response is parsed by the same logic as a bare payload. Reparses any
+/// stringified-JSON it meets on the way down. Bounded to a few hops.
+fn unwrap_envelope(v: &Value) -> Value {
+    const ENVELOPE_KEYS: &[&str] = &["data", "results", "result", "payload", "response", "quotes"];
+    let mut cur = reparse_json_string(v);
+    for _ in 0..4 {
+        let Some(obj) = cur.as_object() else { break };
+        let mut advanced = false;
+        for k in ENVELOPE_KEYS {
+            if let Some(raw) = obj.get(*k) {
+                let inner = reparse_json_string(raw);
+                if inner.is_object() || inner.is_array() {
+                    cur = inner;
+                    advanced = true;
+                    break;
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    cur
 }
 
 /// Find the array of records inside an arbitrarily-shaped tool result. Handles a
@@ -565,26 +632,26 @@ fn quote_fields(rec: &Value) -> Quote {
 /// Parse a quotes payload into `ticker → quote`. Handles a list/wrapper of quote
 /// objects *and* a `{ "AAPL": {…} }` symbol-keyed map, tolerant of key spellings.
 fn parse_quotes(v: &Value) -> HashMap<String, Quote> {
+    let v = unwrap_envelope(v);
     let mut out = HashMap::new();
-    let records = find_records(v);
-    if records.is_empty() {
-        // Symbol-keyed map shape: keys are tickers, values are quote objects.
-        if let Some(map) = v.as_object() {
-            for (k, rec) in map {
-                let sym = k.to_ascii_uppercase();
-                if rec.is_object() && looks_like_ticker(&sym) {
-                    out.insert(sym, quote_fields(rec));
-                }
-            }
-        }
-        return out;
-    }
-    for rec in records {
+    for rec in find_records(&v) {
         if let Some(sym) = text(&rec, &["symbol", "ticker", "instrument_symbol"])
             .map(|s| s.to_ascii_uppercase())
             .filter(|s| looks_like_ticker(s))
         {
             out.insert(sym, quote_fields(&rec));
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    // Symbol-keyed map shape: keys are tickers, values are quote objects.
+    if let Some(map) = v.as_object() {
+        for (k, rec) in map {
+            let sym = k.to_ascii_uppercase();
+            if rec.is_object() && looks_like_ticker(&sym) {
+                out.insert(sym, quote_fields(rec));
+            }
         }
     }
     out
@@ -618,6 +685,7 @@ fn extract_series(v: &Value) -> Vec<f64> {
 /// Handles a `{ "AAPL": [...] }` symbol-keyed map as well as a list/wrapper of
 /// per-symbol records.
 fn parse_historicals(v: &Value) -> HashMap<String, Vec<f64>> {
+    let v = unwrap_envelope(v);
     let mut out = HashMap::new();
     // Symbol-keyed map: { "AAPL": [points…] } or { "AAPL": { historicals: [...] } }.
     if let Some(map) = v.as_object() {
@@ -642,7 +710,7 @@ fn parse_historicals(v: &Value) -> HashMap<String, Vec<f64>> {
             }
         }
     }
-    for rec in find_records(v) {
+    for rec in find_records(&v) {
         if let Some(sym) = text(&rec, &["symbol", "ticker"])
             .map(|s| s.to_ascii_uppercase())
             .filter(|s| looks_like_ticker(s))
@@ -857,7 +925,7 @@ impl RobinhoodClient {
                     let series = parse_historicals(&val);
                     if series.is_empty() {
                         if !is_empty_payload(&val) {
-                            debug.push(format!("{} → {}", t.name, shape_of(&val)));
+                            debug.push(format!("{} → {}", t.name, shape_preview(&val)));
                         }
                     } else {
                         for p in positions.iter_mut() {
@@ -898,7 +966,7 @@ impl RobinhoodClient {
                 let val = tool_result_value(&res);
                 let quotes = parse_quotes(&val);
                 if quotes.is_empty() && !is_empty_payload(&val) {
-                    debug.push(format!("{} → {}", t.name, shape_of(&val)));
+                    debug.push(format!("{} → {}", t.name, shape_preview(&val)));
                 }
                 out.extend(quotes);
             }
@@ -1315,6 +1383,76 @@ mod tests {
         assert_eq!(h.get("AAPL").unwrap(), &vec![10.0, 12.0]);
         assert_eq!(h.get("MSFT").unwrap(), &vec![1.0, 2.0, 3.0]);
     }
+
+    #[test]
+    fn parse_quotes_unwraps_data_guide_envelope() {
+        // The live Robinhood shape: quotes nested under a { data, guide } envelope.
+        // data as a symbol-keyed map…
+        let keyed = json!({
+            "data": {
+                "AAPL": { "last_trade_price": "200.0", "previous_close": "190.0" },
+                "BRK.B": { "last_trade_price": 500.0, "previous_close": 500.0 },
+            },
+            "guide": "Some descriptive text 1 2 3.",
+        });
+        let q = parse_quotes(&keyed);
+        assert_eq!(q.get("AAPL").unwrap().price, Some(200.0));
+        assert_eq!(q.get("BRK.B").unwrap().price, Some(500.0));
+
+        // …and data as a list of quote records.
+        let listed = json!({
+            "data": [{ "symbol": "MSFT", "price": 400.0, "change_percent_today": 1.25 }],
+            "guide": {},
+        });
+        let q = parse_quotes(&listed);
+        assert_eq!(q.get("MSFT").unwrap().change_pct, Some(1.25));
+    }
+
+    #[test]
+    fn parse_historicals_unwraps_data_envelope() {
+        let v = json!({
+            "data": { "AAPL": [{ "close_price": "10.0" }, { "close_price": "11.5" }] },
+            "guide": "ignored",
+        });
+        let h = parse_historicals(&v);
+        assert_eq!(h.get("AAPL").unwrap(), &vec![10.0, 11.5]);
+    }
+
+    #[test]
+    fn tool_result_value_reparses_stringified_json() {
+        // Historicals can arrive as a JSON *string* under structuredContent.
+        let res = json!({
+            "structuredContent": "{\"AAPL\":[{\"close_price\":1.0},{\"close_price\":2.0}]}"
+        });
+        let val = tool_result_value(&res);
+        assert!(val.is_object(), "stringified JSON should be decoded to an object");
+        let h = parse_historicals(&val);
+        assert_eq!(h.get("AAPL").unwrap(), &vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn shape_of_recurses_one_level_without_leaking_values() {
+        let v = json!({ "data": { "AAPL": { "last_trade_price": "172.99" } }, "guide": "x" });
+        let s = shape_of(&v);
+        // Reveals the nested structure so a miss is diagnosable…
+        assert!(s.contains("data:object"));
+        assert!(s.contains("AAPL"));
+        // …but never the actual price.
+        assert!(!s.contains("172.99"));
+    }
+
+    #[test]
+    fn shape_preview_redacts_numbers_in_string_payloads() {
+        let v = json!("2026-06-17,172.99,170.10\n2026-06-17,173.00,171.00");
+        let s = shape_preview(&v);
+        assert!(s.starts_with("string «"));
+        for leak in ["172.99", "170.10", "173.00"] {
+            assert!(!s.contains(leak), "leaked {leak}");
+        }
+        // The structural commas survive so a CSV format is recognizable.
+        assert!(s.contains(","));
+    }
+
 
     #[test]
     fn symbols_value_respects_schema_type() {
