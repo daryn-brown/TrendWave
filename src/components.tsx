@@ -321,8 +321,8 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
           <span>
             <strong>{candidate.ticker}</strong> is{" "}
             <strong>{candidate.verified_name ?? candidate.company}</strong> — which may not match this
-            thesis. The model proposed “{candidate.company}”; confirm the ticker is the company you
-            intend before acting on the figures below.
+            thesis. The model proposed “{candidate.company}”; its score has been reduced. Confirm the
+            ticker is the company you intend before acting on the figures below.
           </span>
         </div>
       )}
