@@ -44,6 +44,20 @@ struct Quote {
     volume: Option<Vec<Option<f64>>>,
 }
 
+/// Some Yahoo quotes are denominated in a currency *subunit* (London in pence
+/// "GBp", Johannesburg in cents "ZAc", Tel Aviv in agorot "ILA") rather than the
+/// major unit. Convert those to the major unit and canonical ISO-4217 code so
+/// the price and any derived ratios are consistent and format correctly (e.g.
+/// 2164 GBp → 21.64 GBP, not £2,164). Unknown codes pass through unchanged.
+fn to_major_units(price: f64, currency: &str) -> (f64, String) {
+    match currency {
+        "GBp" | "GBX" => (price / 100.0, "GBP".to_string()),
+        "ZAc" | "ZAX" => (price / 100.0, "ZAR".to_string()),
+        "ILA" | "ILa" => (price / 100.0, "ILS".to_string()),
+        other => (price, other.to_string()),
+    }
+}
+
 /// Fetch a price snapshot for `symbol` over the last month of daily candles.
 /// Doubles as ticker validation: a symbol with no chart data is treated as
 /// invalid and surfaces as `EmptyFeed`.
@@ -77,7 +91,7 @@ pub async fn fetch_price(http: &reqwest::Client, symbol: &str) -> AppResult<Pric
         .flatten()
         .collect();
 
-    let price = result
+    let raw_price = result
         .meta
         .regular_market_price
         .or_else(|| closes.last().copied())
@@ -93,9 +107,12 @@ pub async fn fetch_price(http: &reqwest::Client, symbol: &str) -> AppResult<Pric
         volumes.iter().sum::<f64>() / volumes.len() as f64
     };
 
+    let raw_currency = result.meta.currency.unwrap_or_else(|| "USD".to_string());
+    let (price, currency) = to_major_units(raw_price, &raw_currency);
+
     Ok(PriceData {
         price,
-        currency: result.meta.currency.unwrap_or_else(|| "USD".to_string()),
+        currency,
         change_pct,
         last_volume: volumes.last().copied().unwrap_or(0.0),
         avg_volume,
@@ -172,4 +189,23 @@ pub async fn fetch_news(
         .collect();
 
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn converts_pence_quotes_to_pounds() {
+        let (price, currency) = to_major_units(2164.0, "GBp");
+        assert!((price - 21.64).abs() < 1e-9);
+        assert_eq!(currency, "GBP");
+    }
+
+    #[test]
+    fn passes_through_major_currencies() {
+        let (price, currency) = to_major_units(150.0, "USD");
+        assert!((price - 150.0).abs() < 1e-9);
+        assert_eq!(currency, "USD");
+    }
 }
