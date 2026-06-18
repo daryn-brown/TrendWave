@@ -104,22 +104,6 @@ pub fn is_read_only_tool(name: &str) -> bool {
     READ.iter().any(|r| n.contains(r))
 }
 
-/// Pick the first read-only tool whose name matches one of `nouns`, in priority
-/// order. Tools that fail the read-only gate (name allow-list or destructive
-/// annotation) are never considered.
-pub fn select_tool<'a>(tools: &'a [ToolInfo], nouns: &[&str]) -> Option<&'a ToolInfo> {
-    for noun in nouns {
-        if let Some(t) = tools
-            .iter()
-            .filter(|t| is_safe_read_tool(t))
-            .find(|t| t.name.to_ascii_lowercase().contains(noun))
-        {
-            return Some(t);
-        }
-    }
-    None
-}
-
 /// A tool is safe to call read-only when its name passes the allow-list AND its
 /// server-supplied annotations don't mark it destructive or non-read-only.
 fn is_safe_read_tool(t: &ToolInfo) -> bool {
@@ -129,6 +113,120 @@ fn is_safe_read_tool(t: &ToolInfo) -> bool {
     match &t.annotations {
         Some(a) if a.destructive_hint == Some(true) || a.read_only_hint == Some(false) => false,
         _ => true,
+    }
+}
+
+/// Robinhood scopes its reads to an account; tools name that argument with one of
+/// these spellings. Returns the one this tool requires, if any.
+fn account_arg_key(t: &ToolInfo) -> Option<&'static str> {
+    ["account_number", "accountNumber", "account_id", "accountId", "account"]
+        .into_iter()
+        .find(|k| t.requires(k))
+}
+
+/// Build the argument set(s) needed to call a read tool, given the account
+/// numbers we discovered. Returns one call per account when the tool is
+/// account-scoped, a single empty-args call when it needs nothing, or an error
+/// describing the required args we can't satisfy.
+fn call_args_for(t: &ToolInfo, account_numbers: &[String]) -> Result<Vec<Value>, String> {
+    let required = t.required_params();
+    if required.is_empty() {
+        return Ok(vec![json!({})]);
+    }
+    // The only required argument we know how to provide is the account id.
+    if let Some(key) = account_arg_key(t) {
+        let others: Vec<&str> = required
+            .iter()
+            .map(String::as_str)
+            .filter(|p| *p != key)
+            .collect();
+        if !others.is_empty() {
+            return Err(format!("needs {}", required.join("+")));
+        }
+        if account_numbers.is_empty() {
+            return Err(format!("needs {key}, no account number discovered"));
+        }
+        return Ok(account_numbers
+            .iter()
+            .map(|n| json!({ key: n }))
+            .collect());
+    }
+    Err(format!("needs {}", required.join("+")))
+}
+
+/// Like `select_tool`, but only returns a tool we can actually call given the
+/// account numbers in hand (skips tools whose required args we can't satisfy).
+fn select_callable<'a>(
+    tools: &'a [ToolInfo],
+    nouns: &[&str],
+    account_numbers: &[String],
+) -> Option<&'a ToolInfo> {
+    for noun in nouns {
+        if let Some(t) = tools
+            .iter()
+            .filter(|t| is_safe_read_tool(t) && call_args_for(t, account_numbers).is_ok())
+            .find(|t| t.name.to_ascii_lowercase().contains(noun))
+        {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Pick the first read-only tool matching a noun that takes no required args, so
+/// it can be called to bootstrap (e.g. to discover account numbers).
+fn pick_no_arg_tool<'a>(tools: &'a [ToolInfo], nouns: &[&str]) -> Option<&'a ToolInfo> {
+    for noun in nouns {
+        if let Some(t) = tools
+            .iter()
+            .filter(|t| is_safe_read_tool(t) && t.required_params().is_empty())
+            .find(|t| t.name.to_ascii_lowercase().contains(noun))
+        {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Deep-scan any JSON for account-number-like fields, preserving order and
+/// de-duplicating. Robinhood returns these from its no-arg accounts read.
+fn collect_account_numbers(v: &Value) -> Vec<String> {
+    fn walk(v: &Value, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                for (k, val) in map {
+                    let kl = k.to_ascii_lowercase();
+                    if kl == "account_number" || kl == "accountnumber" || kl == "account_id" {
+                        let found = match val {
+                            Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+                            Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        };
+                        if let Some(s) = found {
+                            if !out.contains(&s) {
+                                out.push(s);
+                            }
+                        }
+                    }
+                    walk(val, out);
+                }
+            }
+            Value::Array(arr) => arr.iter().for_each(|item| walk(item, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(v, &mut out);
+    out
+}
+
+/// One-line description of a tool for diagnostics: name plus any required args.
+fn describe_tool(t: &ToolInfo) -> String {
+    let req = t.required_params();
+    if req.is_empty() {
+        t.name.clone()
+    } else {
+        format!("{}(needs {})", t.name, req.join("+"))
     }
 }
 
@@ -281,58 +379,77 @@ impl RobinhoodClient {
         let tools = self.mcp.list_tools().await?;
 
         let mut tools_used = Vec::new();
+        let mut account: Option<AccountSummary> = None;
 
-        let positions_tool = select_tool(&tools, &["position", "holding", "portfolio"]);
-        let positions = if let Some(t) = positions_tool {
-            tools_used.push(t.name.clone());
-            let res = self.mcp.call_tool(&t.name, json!({})).await?;
-            parse_positions(&tool_result_value(&res))
-        } else {
-            Vec::new()
-        };
-
-        let account_tool = select_tool(&tools, &["account", "balance"]);
-        let account = if let Some(t) = account_tool {
-            // Don't fail the whole snapshot if the account tool errors.
+        // Phase 1 — bootstrap. Robinhood scopes position/account reads to an
+        // account_number, so first call a no-argument account/accounts tool to
+        // learn the account number(s) (and opportunistically the cash/equity
+        // summary, which the same payload often carries).
+        let mut account_numbers: Vec<String> = Vec::new();
+        if let Some(t) = pick_no_arg_tool(&tools, &["accounts", "account", "balance", "portfolio"]) {
             if let Ok(res) = self.mcp.call_tool(&t.name, json!({})).await {
-                let parsed = parse_account(&tool_result_value(&res));
-                if parsed.is_some() {
+                let val = tool_result_value(&res);
+                account_numbers = collect_account_numbers(&val);
+                if let Some(a) = parse_account(&val) {
+                    account = Some(a);
                     tools_used.push(t.name.clone());
                 }
-                parsed
-            } else {
-                None
             }
-        } else {
-            None
-        };
+        }
+
+        // Phase 2 — positions, scoped per account_number when the tool requires
+        // it. `select_callable` skips any tool whose required args we can't fill.
+        let mut positions: Vec<Position> = Vec::new();
+        if let Some(t) = select_callable(&tools, &["position", "holding", "portfolio"], &account_numbers)
+        {
+            if let Ok(calls) = call_args_for(t, &account_numbers) {
+                for args in calls {
+                    if let Ok(res) = self.mcp.call_tool(&t.name, args).await {
+                        positions.extend(parse_positions(&tool_result_value(&res)));
+                    }
+                }
+            }
+            if !positions.is_empty() {
+                tools_used.push(t.name.clone());
+            }
+        }
+
+        // Phase 3 — fill the account summary if phase 1 didn't, including from a
+        // balance/portfolio tool that itself needs the account_number.
+        if account.is_none() {
+            if let Some(t) = select_callable(&tools, &["account", "balance", "portfolio"], &account_numbers)
+            {
+                if let Ok(calls) = call_args_for(t, &account_numbers) {
+                    for args in calls {
+                        if let Ok(res) = self.mcp.call_tool(&t.name, args).await {
+                            if let Some(a) = parse_account(&tool_result_value(&res)) {
+                                account = Some(a);
+                                tools_used.push(t.name.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         if positions.is_empty() && account.is_none() {
-            // Surface what the server actually offered so the tool selector can be
-            // tuned to Robinhood's real API instead of guessing.
+            // Surface what the server actually offered (names + required args) so
+            // the selector can be tuned to Robinhood's real API.
             let available = tools
                 .iter()
-                .map(|t| t.name.as_str())
+                .map(describe_tool)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let msg = if positions_tool.is_none() && account_tool.is_none() {
-                format!(
-                    "Connected, but none of Robinhood's tools matched a read-only positions \
-                     or account read. Tools the server exposed: [{available}]."
-                )
+            let hint = if account_numbers.is_empty() {
+                " Couldn't discover an account number from any no-argument tool."
             } else {
-                let tried = [positions_tool, account_tool]
-                    .into_iter()
-                    .flatten()
-                    .map(|t| t.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "Connected and called [{tried}], but couldn't recognize any positions or \
-                     account fields in the response. All tools the server exposed: [{available}]."
-                )
+                ""
             };
-            return Err(AppError::Robinhood(msg));
+            return Err(AppError::Robinhood(format!(
+                "Connected, but couldn't read positions or account.{hint} \
+                 Tools the server exposed: [{available}]."
+            )));
         }
 
         Ok(Portfolio {
@@ -350,16 +467,25 @@ mod tests {
     use crate::mcp::{ToolAnnotations, ToolInfo};
 
     fn tool(name: &str) -> ToolInfo {
-        ToolInfo { name: name.into(), annotations: None }
+        ToolInfo { name: name.into(), input_schema: None, annotations: None }
     }
 
     fn tool_annotated(name: &str, read_only: Option<bool>, destructive: Option<bool>) -> ToolInfo {
         ToolInfo {
             name: name.into(),
+            input_schema: None,
             annotations: Some(ToolAnnotations {
                 read_only_hint: read_only,
                 destructive_hint: destructive,
             }),
+        }
+    }
+
+    fn tool_requiring(name: &str, required: &[&str]) -> ToolInfo {
+        ToolInfo {
+            name: name.into(),
+            input_schema: Some(json!({ "type": "object", "required": required })),
+            annotations: None,
         }
     }
 
@@ -388,25 +514,89 @@ mod tests {
     }
 
     #[test]
-    fn select_tool_prefers_positions_then_account() {
+    fn select_callable_prefers_positions_then_account() {
         let tools = vec![tool("get_account"), tool("list_positions"), tool("place_order")];
-        assert_eq!(select_tool(&tools, &["position", "holding"]).unwrap().name, "list_positions");
-        assert_eq!(select_tool(&tools, &["account"]).unwrap().name, "get_account");
+        assert_eq!(
+            select_callable(&tools, &["position", "holding"], &[]).unwrap().name,
+            "list_positions"
+        );
+        assert_eq!(select_callable(&tools, &["account"], &[]).unwrap().name, "get_account");
         // A mutating tool is never selected even if the noun matches.
-        assert!(select_tool(&vec![tool("place_order")], &["order"]).is_none());
+        assert!(select_callable(&vec![tool("place_order")], &["order"], &[]).is_none());
     }
 
     #[test]
-    fn select_tool_skips_destructive_annotation() {
+    fn select_callable_skips_destructive_annotation() {
         // Name looks like a benign read, but the server flags it destructive.
         let tools = vec![tool_annotated("get_positions", None, Some(true))];
-        assert!(select_tool(&tools, &["position"]).is_none());
+        assert!(select_callable(&tools, &["position"], &[]).is_none());
         // Explicitly non-read-only is likewise refused.
         let tools = vec![tool_annotated("portfolio_view", Some(false), None)];
-        assert!(select_tool(&tools, &["portfolio"]).is_none());
+        assert!(select_callable(&tools, &["portfolio"], &[]).is_none());
         // A clean read-only annotation is fine.
         let tools = vec![tool_annotated("list_positions", Some(true), Some(false))];
-        assert_eq!(select_tool(&tools, &["position"]).unwrap().name, "list_positions");
+        assert_eq!(
+            select_callable(&tools, &["position"], &[]).unwrap().name,
+            "list_positions"
+        );
+    }
+
+    #[test]
+    fn collect_account_numbers_scans_nested_and_dedupes() {
+        let v = json!({
+            "results": [
+                { "account_number": "ABC123", "type": "brokerage" },
+                { "account_number": "ABC123" },
+                { "accountNumber": "XYZ789" },
+            ]
+        });
+        assert_eq!(collect_account_numbers(&v), vec!["ABC123", "XYZ789"]);
+        // Numeric account ids are stringified.
+        assert_eq!(collect_account_numbers(&json!({ "account_id": 42 })), vec!["42"]);
+    }
+
+    #[test]
+    fn call_args_for_handles_no_arg_and_account_scoped_tools() {
+        // No required args → a single empty-args call.
+        assert_eq!(call_args_for(&tool("get_positions"), &[]).unwrap(), vec![json!({})]);
+
+        // Requires account_number → one call per discovered account, keyed right.
+        let t = tool_requiring("get_positions", &["account_number"]);
+        let nums = vec!["A1".to_string(), "A2".to_string()];
+        assert_eq!(
+            call_args_for(&t, &nums).unwrap(),
+            vec![json!({ "account_number": "A1" }), json!({ "account_number": "A2" })]
+        );
+
+        // Requires account_number but none known → unsatisfiable.
+        assert!(call_args_for(&t, &[]).is_err());
+
+        // Requires something we can't provide → unsatisfiable.
+        let weird = tool_requiring("get_positions", &["start_date"]);
+        assert!(call_args_for(&weird, &nums).is_err());
+    }
+
+    #[test]
+    fn select_callable_skips_tools_we_cannot_satisfy() {
+        // The positions tool needs an account number; with none known it's skipped.
+        let tools = vec![tool_requiring("get_positions", &["account_number"])];
+        assert!(select_callable(&tools, &["position"], &[]).is_none());
+        // Once we have a number, it becomes callable.
+        let nums = vec!["A1".to_string()];
+        assert_eq!(
+            select_callable(&tools, &["position"], &nums).unwrap().name,
+            "get_positions"
+        );
+    }
+
+    #[test]
+    fn pick_no_arg_tool_requires_empty_schema() {
+        let tools = vec![
+            tool_requiring("get_account", &["account_number"]),
+            tool("list_accounts"),
+        ];
+        // Skips the account_number-scoped tool, picks the no-arg lister.
+        assert_eq!(pick_no_arg_tool(&tools, &["account"]).unwrap().name, "list_accounts");
     }
 
     #[test]

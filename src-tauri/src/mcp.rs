@@ -25,8 +25,31 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
+    #[serde(default, rename = "inputSchema")]
+    pub input_schema: Option<Value>,
     #[serde(default)]
     pub annotations: Option<ToolAnnotations>,
+}
+
+impl ToolInfo {
+    /// Argument names the server marks required (`inputSchema.required[]`).
+    pub fn required_params(&self) -> Vec<String> {
+        self.input_schema
+            .as_ref()
+            .and_then(|s| s.get("required"))
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the tool requires an argument named `key`.
+    pub fn requires(&self, key: &str) -> bool {
+        self.required_params().iter().any(|p| p == key)
+    }
 }
 
 /// Optional, server-supplied hints about a tool. We use these as a *second*
