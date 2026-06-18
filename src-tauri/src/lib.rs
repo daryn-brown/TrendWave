@@ -1,3 +1,4 @@
+mod biometric;
 mod commands;
 mod db;
 mod error;
@@ -45,6 +46,7 @@ pub fn run() {
                 db: Mutex::new(conn),
                 http,
                 robinhood: Mutex::new(None),
+                unlocked: std::sync::atomic::AtomicBool::new(false),
             });
 
             Ok(())
@@ -61,6 +63,8 @@ pub fn run() {
             commands::robinhood_connect,
             commands::robinhood_disconnect,
             commands::robinhood_portfolio,
+            commands::biometric_available,
+            commands::biometric_unlock,
         ])
         .run(tauri::generate_context!());
 

@@ -17,6 +17,10 @@ pub struct Settings {
     /// Pull real fundamentals (SEC EDGAR + Yahoo) to drive the growth score.
     /// Disabling falls back to the model's own upside guess and speeds runs up.
     pub use_fundamentals: bool,
+    /// Require a Touch ID / Windows Hello check on launch before the saved
+    /// Robinhood session (and its portfolio) is revealed. Off by default so a
+    /// fresh install needs no biometric hardware.
+    pub require_biometric_unlock: bool,
 }
 
 impl Default for Settings {
@@ -27,6 +31,7 @@ impl Default for Settings {
             max_results: 8,
             use_news: true,
             use_fundamentals: true,
+            require_biometric_unlock: false,
         }
     }
 }
