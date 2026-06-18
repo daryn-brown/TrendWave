@@ -31,6 +31,10 @@ struct ChartMeta {
     #[serde(rename = "regularMarketPrice")]
     regular_market_price: Option<f64>,
     currency: Option<String>,
+    #[serde(rename = "longName")]
+    long_name: Option<String>,
+    #[serde(rename = "shortName")]
+    short_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -109,10 +113,17 @@ pub async fn fetch_price(http: &reqwest::Client, symbol: &str) -> AppResult<Pric
 
     let raw_currency = result.meta.currency.unwrap_or_else(|| "USD".to_string());
     let (price, currency) = to_major_units(raw_price, &raw_currency);
+    let name = result
+        .meta
+        .long_name
+        .or(result.meta.short_name)
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty());
 
     Ok(PriceData {
         price,
         currency,
+        name,
         change_pct,
         last_volume: volumes.last().copied().unwrap_or(0.0),
         avg_volume,
