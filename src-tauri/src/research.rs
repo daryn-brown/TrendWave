@@ -104,11 +104,60 @@ pub fn score_candidate(
     W_BOTTLENECK * sev + W_MOAT * moat_n + W_GROWTH * growth_n + W_SENTIMENT * senti + W_MOMENTUM * momentum
 }
 
+/// Multiplicative penalty applied when a candidate's ticker resolves to a
+/// company that plainly contradicts the model's claimed business (see
+/// `name_matches`). A confirmed misattribution — e.g. a gold miner pitched as a
+/// solid-state battery-equipment maker — is demoted out of the top tier so it
+/// can't masquerade as a legitimate high-conviction pick. It is *halved*, never
+/// zeroed: the model sometimes returns the bare ticker as the company name,
+/// which trips the check, so we keep the pick visible (with its warning) rather
+/// than risk burying a legitimate one.
+const IDENTITY_MISMATCH_PENALTY: f64 = 0.5;
+
+fn penalize_for_identity(base: f64, mismatch: bool) -> f64 {
+    if mismatch {
+        base * IDENTITY_MISMATCH_PENALTY
+    } else {
+        base
+    }
+}
+
 fn normalize_ticker(raw: &str) -> String {
     raw.trim()
         .trim_start_matches('$')
         .to_ascii_uppercase()
         .replace(' ', "")
+}
+
+/// Tokenize a company name for loose identity comparison: lowercase, split on
+/// non-alphanumerics, and drop common corporate suffixes / filler so
+/// "Agnico Eagle Mines Limited" and "Agnico Eagle Mines" compare equal.
+fn name_tokens(name: &str) -> Vec<String> {
+    const NOISE: &[&str] = &[
+        "inc", "incorporated", "corp", "corporation", "co", "company", "ltd",
+        "limited", "plc", "llc", "lp", "holdings", "holding", "group", "the",
+        "sa", "ag", "nv", "se", "and", "class",
+    ];
+    name.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| t.len() > 1 && !NOISE.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Whether the model's claimed company name plausibly refers to the same entity
+/// as the authoritative registrant name the price feed returns for that ticker.
+/// Conservative on purpose: returns `true` (a match, no warning) unless *both*
+/// names carry meaningful tokens and share none — a genuine contradiction like
+/// ticker "AEM" (Agnico Eagle Mines) described as a battery-equipment maker.
+/// Empty or uninformative names never trigger a false alarm.
+fn name_matches(claimed: &str, authoritative: &str) -> bool {
+    let a = name_tokens(claimed);
+    let b = name_tokens(authoritative);
+    if a.is_empty() || b.is_empty() {
+        return true;
+    }
+    a.iter().any(|t| b.contains(t))
 }
 
 /// Run the full prompt → bottlenecks → candidates → ranked results pipeline,
@@ -172,6 +221,8 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                 candidate: Candidate {
                     ticker,
                     company: c.company.clone(),
+                    verified_name: None,
+                    identity_mismatch: false,
                     price: None,
                     bottleneck: b.title.clone(),
                     thesis: c.thesis.clone().unwrap_or_default(),
@@ -221,6 +272,21 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         if let Ok((idx, symbol, price)) = joined {
             working[idx].candidate.ticker = symbol;
             working[idx].candidate.price = price;
+        }
+    }
+
+    // Identity check: the model invents company+ticker pairs and the pipeline
+    // otherwise trusts them blindly, so a real ticker stamped onto the wrong
+    // business (e.g. "AEM" sold as a battery-equipment maker when it is really
+    // Agnico Eagle Mines, a gold miner) flows through with real, high-scoring
+    // data. Compare the model's claimed company against the authoritative name
+    // the price feed returns for that ticker, surface the real name, and flag a
+    // plain contradiction so the card can warn instead of silently misleading.
+    for w in working.iter_mut() {
+        let real = w.candidate.price.as_ref().and_then(|p| p.name.clone());
+        if let Some(real) = real {
+            w.candidate.identity_mismatch = !name_matches(&w.candidate.company, &real);
+            w.candidate.verified_name = Some(real);
         }
     }
 
@@ -294,13 +360,14 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             (w.candidate.upside.clamp(1, 5) as f64) / 5.0
         };
         w.candidate.growth_score = growth;
-        w.candidate.score = score_candidate(
+        let base = score_candidate(
             w.severity,
             w.candidate.moat,
             growth,
             w.candidate.sentiment,
             w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
         );
+        w.candidate.score = penalize_for_identity(base, w.candidate.identity_mismatch);
     }
     working.sort_by(|a, b| {
         b.candidate
@@ -393,5 +460,42 @@ mod tests {
     fn normalize_ticker_strips_noise() {
         assert_eq!(normalize_ticker(" $aapl "), "AAPL");
         assert_eq!(normalize_ticker("brk b"), "BRKB");
+    }
+
+    #[test]
+    fn name_matches_ignores_corporate_suffixes() {
+        assert!(name_matches("Agnico Eagle Mines", "Agnico Eagle Mines Limited"));
+        assert!(name_matches("NVIDIA Corporation", "NVIDIA Corporation"));
+        assert!(name_matches("3M", "3M Company"));
+    }
+
+    #[test]
+    fn name_matches_flags_real_contradiction() {
+        // The AEM case: model claims a battery-equipment maker, but the ticker
+        // resolves to a gold miner — no shared token, so it's a mismatch.
+        assert!(!name_matches("AEM", "Agnico Eagle Mines Limited"));
+        assert!(!name_matches(
+            "Solid Power Battery Equipment",
+            "Agnico Eagle Mines Limited"
+        ));
+    }
+
+    #[test]
+    fn name_matches_never_warns_on_empty_names() {
+        assert!(name_matches("", "Agnico Eagle Mines Limited"));
+        assert!(name_matches("Anything Inc", ""));
+        // Pure noise tokens collapse to empty → treated as a match, not a warning.
+        assert!(name_matches("The Company", "Holdings Group"));
+    }
+
+    #[test]
+    fn identity_mismatch_demotes_but_never_zeroes() {
+        let base = score_candidate(5, 5, 0.8, Some(0.5), 10.0);
+        let penalized = penalize_for_identity(base, true);
+        assert!(penalized < base, "a mismatch must lower the score");
+        assert!(penalized > 0.0, "a mismatch must not zero a pick out");
+        assert_eq!(penalized, base * IDENTITY_MISMATCH_PENALTY);
+        // A clean candidate is untouched.
+        assert_eq!(penalize_for_identity(base, false), base);
     }
 }
