@@ -3,6 +3,7 @@ import "./App.css";
 import * as api from "./api";
 import {
   BottleneckList,
+  BrokerPortfolioTabs,
   CandidateCard,
   ErrorBanner,
   IconRefresh,
@@ -16,6 +17,7 @@ import {
   SettingsModal,
   UpdateBanner,
   WatchlistSidebar,
+  type BrokerTab,
   type UpdatePhase,
 } from "./components";
 import type {
@@ -428,35 +430,46 @@ export default function App() {
 
           {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
-          {robinhood?.connected &&
-            (robinhood.locked ? (
-              <PortfolioLocked busy={unlocking} onUnlock={handleUnlock} />
-            ) : robinhood.portfolio ? (
-              <PortfolioPanel
-                portfolio={robinhood.portfolio}
-                busy={rhBusy}
-                onRefresh={handleRefreshPortfolio}
-                broker="robinhood"
-              />
-            ) : (
-              <PortfolioEmpty busy={rhBusy} onLoad={handleRefreshPortfolio} broker="robinhood" />
-            ))}
-
-          {questrade?.connected &&
-            (questrade.portfolio ? (
-              <PortfolioPanel
-                portfolio={questrade.portfolio}
-                busy={qtBusy}
-                onRefresh={handleRefreshQuestradePortfolio}
-                broker="questrade"
-              />
-            ) : (
-              <PortfolioEmpty
-                busy={qtBusy}
-                onLoad={handleRefreshQuestradePortfolio}
-                broker="questrade"
-              />
-            ))}
+          {(() => {
+            const brokerTabs: BrokerTab[] = [];
+            if (robinhood?.connected) {
+              brokerTabs.push({
+                broker: "robinhood",
+                content: robinhood.locked ? (
+                  <PortfolioLocked busy={unlocking} onUnlock={handleUnlock} />
+                ) : robinhood.portfolio ? (
+                  <PortfolioPanel
+                    portfolio={robinhood.portfolio}
+                    busy={rhBusy}
+                    onRefresh={handleRefreshPortfolio}
+                    broker="robinhood"
+                  />
+                ) : (
+                  <PortfolioEmpty busy={rhBusy} onLoad={handleRefreshPortfolio} broker="robinhood" />
+                ),
+              });
+            }
+            if (questrade?.connected) {
+              brokerTabs.push({
+                broker: "questrade",
+                content: questrade.portfolio ? (
+                  <PortfolioPanel
+                    portfolio={questrade.portfolio}
+                    busy={qtBusy}
+                    onRefresh={handleRefreshQuestradePortfolio}
+                    broker="questrade"
+                  />
+                ) : (
+                  <PortfolioEmpty
+                    busy={qtBusy}
+                    onLoad={handleRefreshQuestradePortfolio}
+                    broker="questrade"
+                  />
+                ),
+              });
+            }
+            return <BrokerPortfolioTabs tabs={brokerTabs} />;
+          })()}
 
           {running && <ProgressLog messages={messages} running={running} />}
 
