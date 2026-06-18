@@ -1,4 +1,5 @@
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
@@ -55,6 +56,7 @@ struct PlanBottleneck {
     title: String,
     #[serde(default)]
     description: String,
+    #[serde(default, deserialize_with = "de_rating")]
     severity: Option<u8>,
     #[serde(default)]
     companies: Vec<PlanCompany>,
@@ -65,9 +67,36 @@ struct PlanCompany {
     company: String,
     ticker: Option<String>,
     thesis: Option<String>,
+    #[serde(default, deserialize_with = "de_rating")]
     moat: Option<u8>,
+    #[serde(default, deserialize_with = "de_rating")]
     upside: Option<u8>,
     upside_rationale: Option<String>,
+}
+
+/// Coerce a model-provided 1–5 rating into `Option<u8>`, tolerating the shapes
+/// local models actually emit: integers (`4`), floats (`3.5`), or numeric
+/// strings (`"4"`). The value is rounded to the nearest integer and clamped to
+/// the documented 1..=5 band. Anything non-numeric (null, bool, array, object,
+/// prose) becomes `None` — so a single odd value can never abort the whole
+/// `BottleneckPlan` parse the way a bare `u8` field does (it previously failed
+/// with "invalid type: floating point `3.5`, expected u8").
+fn de_rating<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Option::<Value>::deserialize(deserializer)?;
+    let n = match raw {
+        Some(Value::Number(num)) => num.as_f64(),
+        Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    };
+    Ok(n.filter(|x| x.is_finite()).map(round_rating))
+}
+
+/// Round to nearest and clamp into the documented 1..=5 rating band.
+fn round_rating(x: f64) -> u8 {
+    x.round().clamp(1.0, 5.0) as u8
 }
 
 #[derive(Deserialize)]
@@ -512,5 +541,55 @@ mod tests {
         assert_eq!(penalized, base * IDENTITY_MISMATCH_PENALTY);
         // A clean candidate is untouched.
         assert_eq!(penalize_for_identity(base, false), base);
+    }
+
+    #[test]
+    fn fractional_rating_does_not_abort_parse() {
+        // Reproduces the reported bug: a local model returned `severity: 3.5`
+        // (and fractional moat/upside) where the schema asks for integers, which
+        // used to fail the entire `from_str::<BottleneckPlan>` with "invalid
+        // type: floating point `3.5`, expected u8".
+        let json = r#"{
+            "industry": "Energy",
+            "summary": "…",
+            "bottlenecks": [{
+                "title": "Refining Capacity Constraints",
+                "description": "…",
+                "severity": 3.5,
+                "companies": [{
+                    "company": "Acme Refining",
+                    "ticker": "ACME",
+                    "thesis": "…",
+                    "moat": 4.5,
+                    "upside": 2.4,
+                    "upside_rationale": "…"
+                }]
+            }]
+        }"#;
+        let plan: BottleneckPlan =
+            serde_json::from_str(json).expect("fractional ratings must parse, not error");
+        let b = &plan.bottlenecks[0];
+        assert_eq!(b.severity, Some(4)); // 3.5 → 4
+        assert_eq!(b.companies[0].moat, Some(5)); // 4.5 → 5
+        assert_eq!(b.companies[0].upside, Some(2)); // 2.4 → 2
+    }
+
+    #[test]
+    fn round_rating_rounds_and_clamps() {
+        assert_eq!(round_rating(3.5), 4);
+        assert_eq!(round_rating(2.4), 2);
+        assert_eq!(round_rating(0.2), 1); // clamps up to the 1..=5 floor
+        assert_eq!(round_rating(99.0), 5); // clamps down to the ceiling
+    }
+
+    #[test]
+    fn de_rating_tolerates_strings_clamps_and_defaults() {
+        let sev = |s: &str| serde_json::from_str::<PlanBottleneck>(s).unwrap().severity;
+        assert_eq!(sev(r#"{"title":"t","severity":"5"}"#), Some(5)); // numeric string
+        assert_eq!(sev(r#"{"title":"t","severity":9}"#), Some(5)); // out of range → ceiling
+        assert_eq!(sev(r#"{"title":"t","severity":0}"#), Some(1)); // out of range → floor
+        assert_eq!(sev(r#"{"title":"t","severity":"high"}"#), None); // prose → default later
+        assert_eq!(sev(r#"{"title":"t","severity":null}"#), None);
+        assert_eq!(sev(r#"{"title":"t"}"#), None); // missing field
     }
 }
