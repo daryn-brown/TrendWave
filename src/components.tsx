@@ -803,6 +803,34 @@ export function PortfolioPanel({
   );
 }
 
+export function PortfolioEmpty({ busy, onLoad }: { busy: boolean; onLoad: () => void }) {
+  return (
+    <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_18px_50px_-40px_rgba(0,0,0,0.8)]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+            Your portfolio
+          </h2>
+          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/25">
+            Connected · read-only
+          </span>
+        </div>
+        <button
+          onClick={onLoad}
+          disabled={busy}
+          className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
+        >
+          {busy ? "Loading…" : "Load portfolio"}
+        </button>
+      </div>
+      <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+        No snapshot loaded yet. Click <span className="font-medium">Load portfolio</span> to pull your
+        positions — they’ll be used (read-only) to badge picks you already own.
+      </p>
+    </section>
+  );
+}
+
 function TextField({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
   return (
     <label className="block">

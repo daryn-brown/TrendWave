@@ -10,6 +10,7 @@ import {
   IconSparkles,
   IconSpinner,
   ProgressLog,
+  PortfolioEmpty,
   PortfolioPanel,
   SettingsModal,
   UpdateBanner,
@@ -63,8 +64,22 @@ export default function App() {
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
     refreshWatchlists();
-    // Reflect any previously-authorized Robinhood session (read-only).
-    api.robinhoodStatus().then(setRobinhood).catch(() => {});
+    // Reflect any previously-authorized Robinhood session (read-only). If we're
+    // connected but the in-memory snapshot was cleared (e.g. app restart), pull
+    // it once so the panel populates without manual action. Stay quiet on
+    // failure — the panel's Load button surfaces the real error on demand.
+    api
+      .robinhoodStatus()
+      .then((s) => {
+        setRobinhood(s);
+        if (s.connected && !s.portfolio) {
+          api
+            .robinhoodPortfolio()
+            .then((portfolio) => setRobinhood({ connected: true, portfolio }))
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
     // Silent check on launch; failures (e.g. running in dev) are ignored.
     checkForUpdate()
       .then((u) => {
@@ -325,13 +340,16 @@ export default function App() {
 
           {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
-          {robinhood?.connected && robinhood.portfolio && (
-            <PortfolioPanel
-              portfolio={robinhood.portfolio}
-              busy={rhBusy}
-              onRefresh={handleRefreshPortfolio}
-            />
-          )}
+          {robinhood?.connected &&
+            (robinhood.portfolio ? (
+              <PortfolioPanel
+                portfolio={robinhood.portfolio}
+                busy={rhBusy}
+                onRefresh={handleRefreshPortfolio}
+              />
+            ) : (
+              <PortfolioEmpty busy={rhBusy} onLoad={handleRefreshPortfolio} />
+            ))}
 
           {running && <ProgressLog messages={messages} running={running} />}
 
