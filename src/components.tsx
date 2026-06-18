@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppErrorShape,
@@ -917,6 +917,87 @@ function Sparkline({ data, positive }: { data: number[]; positive: boolean }) {
         strokeLinejoin="round"
       />
     </svg>
+  );
+}
+
+export interface BrokerTab {
+  broker: BrokerKind;
+  content: ReactNode;
+}
+
+/// Switches between connected brokers' portfolio tables. A single broker renders
+/// its panel bare; two or more get a pill tab bar and a horizontal slide (the
+/// active panel's measured height drives the container so the slide stays smooth
+/// even when the two tables differ in length).
+export function BrokerPortfolioTabs({ tabs }: { tabs: BrokerTab[] }) {
+  const [active, setActive] = useState(0);
+  const safeActive = Math.min(active, Math.max(tabs.length - 1, 0));
+  const panelRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const [height, setHeight] = useState<number | undefined>(undefined);
+
+  useLayoutEffect(() => {
+    const el = panelRefs.current[safeActive];
+    if (!el) return;
+    const measure = () => setHeight(el.offsetHeight);
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [safeActive, tabs.length]);
+
+  if (tabs.length === 0) return null;
+  if (tabs.length === 1) return <>{tabs[0].content}</>;
+
+  return (
+    <section>
+      <div
+        role="tablist"
+        aria-label="Connected brokers"
+        className="mb-3 flex gap-1 rounded-2xl bg-slate-100 p-1 dark:bg-slate-800/60"
+      >
+        {tabs.map((t, i) => {
+          const selected = safeActive === i;
+          return (
+            <button
+              key={t.broker}
+              role="tab"
+              aria-selected={selected}
+              onClick={() => setActive(i)}
+              className={`flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-1.5 text-xs font-semibold transition-colors ${
+                selected
+                  ? "bg-white text-slate-900 shadow-sm dark:bg-slate-900 dark:text-slate-100"
+                  : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+              }`}
+            >
+              <BrokerIcon broker={t.broker} className="h-4 w-4 shrink-0" />
+              {brokerLabel(t.broker)}
+            </button>
+          );
+        })}
+      </div>
+      <div
+        className="relative overflow-hidden transition-[height] duration-300 ease-out motion-reduce:transition-none"
+        style={{ height }}
+      >
+        <div
+          className="flex transition-transform duration-300 ease-out motion-reduce:transition-none"
+          style={{ transform: `translateX(-${safeActive * 100}%)` }}
+        >
+          {tabs.map((t, i) => (
+            <div
+              key={t.broker}
+              ref={(el) => {
+                panelRefs.current[i] = el;
+              }}
+              aria-hidden={safeActive !== i}
+              className="w-full shrink-0 self-start"
+            >
+              {t.content}
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
