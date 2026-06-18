@@ -42,6 +42,9 @@ pub enum AppError {
     #[error("Questrade is not connected. Connect it in Settings to enable portfolio context.")]
     QuestradeNotConnected,
 
+    #[error("Questrade rejected the saved access token. Reconnect Questrade in Settings.")]
+    QuestradeUnauthorized,
+
     #[error("Questrade integration error: {0}")]
     Questrade(String),
 
@@ -63,6 +66,7 @@ impl AppError {
             AppError::Locked => "locked",
             AppError::Biometric(_) => "biometric",
             AppError::QuestradeNotConnected => "questrade_not_connected",
+            AppError::QuestradeUnauthorized => "questrade_unauthorized",
             AppError::Questrade(_) => "questrade",
             AppError::Other(_) => "other",
         }
