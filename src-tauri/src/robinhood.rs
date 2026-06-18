@@ -154,23 +154,21 @@ fn call_args_for(t: &ToolInfo, account_numbers: &[String]) -> Result<Vec<Value>,
     Err(format!("needs {}", required.join("+")))
 }
 
-/// Like `select_tool`, but only returns a tool we can actually call given the
-/// account numbers in hand (skips tools whose required args we can't satisfy).
-fn select_callable<'a>(
+/// All read-only tools we can actually call (given the account numbers in hand)
+/// whose name matches any of `nouns`, in tools-list order.
+fn callable_matching<'a>(
     tools: &'a [ToolInfo],
     nouns: &[&str],
     account_numbers: &[String],
-) -> Option<&'a ToolInfo> {
-    for noun in nouns {
-        if let Some(t) = tools
-            .iter()
-            .filter(|t| is_safe_read_tool(t) && call_args_for(t, account_numbers).is_ok())
-            .find(|t| t.name.to_ascii_lowercase().contains(noun))
-        {
-            return Some(t);
-        }
-    }
-    None
+) -> Vec<&'a ToolInfo> {
+    tools
+        .iter()
+        .filter(|t| is_safe_read_tool(t) && call_args_for(t, account_numbers).is_ok())
+        .filter(|t| {
+            let n = t.name.to_ascii_lowercase();
+            nouns.iter().any(|noun| n.contains(noun))
+        })
+        .collect()
 }
 
 /// Pick the first read-only tool matching a noun that takes no required args, so
@@ -230,6 +228,27 @@ fn describe_tool(t: &ToolInfo) -> String {
     }
 }
 
+/// Describe the *shape* of a tool response — its keys only, never its values —
+/// so a parsing miss can be diagnosed without leaking holdings or balances.
+fn shape_of(v: &Value) -> String {
+    match v {
+        Value::Object(map) => {
+            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            format!("object{{{}}}", keys.join(","))
+        }
+        Value::Array(arr) => match arr.first() {
+            Some(Value::Object(first)) => {
+                let keys: Vec<&str> = first.keys().map(String::as_str).collect();
+                format!("array[{}] of object{{{}}}", arr.len(), keys.join(","))
+            }
+            _ => format!("array[{}]", arr.len()),
+        },
+        Value::String(_) => "string".into(),
+        Value::Null => "null".into(),
+        _ => "scalar".into(),
+    }
+}
+
 /// Reduce a `tools/call` result to the JSON we can parse: prefer the typed
 /// `structuredContent`, otherwise JSON-decode the joined text content, otherwise
 /// fall back to the raw text as a string.
@@ -259,13 +278,17 @@ fn tool_result_value(result: &Value) -> Value {
 }
 
 /// Find the array of records inside an arbitrarily-shaped tool result. Handles a
-/// bare array, or an object that wraps the array under a common key.
+/// bare array, an object that wraps the array under a common key, or — as a last
+/// resort — the first nested array of objects anywhere in the payload.
 fn find_records(v: &Value) -> Vec<Value> {
     if let Some(arr) = v.as_array() {
         return arr.clone();
     }
     if let Some(obj) = v.as_object() {
-        const KEYS: &[&str] = &["positions", "holdings", "results", "data", "items", "equities"];
+        const KEYS: &[&str] = &[
+            "positions", "holdings", "results", "data", "items", "equities",
+            "equity_positions", "option_positions",
+        ];
         for k in KEYS {
             if let Some(arr) = obj.get(*k).and_then(Value::as_array) {
                 return arr.clone();
@@ -275,8 +298,30 @@ fn find_records(v: &Value) -> Vec<Value> {
         if obj.contains_key("symbol") || obj.contains_key("ticker") {
             return vec![v.clone()];
         }
+        // Fallback: the first nested array of objects found anywhere below.
+        if let Some(arr) = first_object_array(v) {
+            return arr;
+        }
     }
     Vec::new()
+}
+
+/// Depth-first search for the first array whose elements are objects.
+fn first_object_array(v: &Value) -> Option<Vec<Value>> {
+    match v {
+        Value::Array(arr) if arr.first().is_some_and(Value::is_object) => Some(arr.clone()),
+        Value::Object(obj) => obj.values().find_map(first_object_array),
+        Value::Array(arr) => arr.iter().find_map(first_object_array),
+        _ => None,
+    }
+}
+
+/// Guard against mistaking a non-symbol field (e.g. an `instrument` URL) for a
+/// ticker: real tickers are short and alphanumeric.
+fn looks_like_ticker(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 8
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 /// Read a numeric field that may be encoded as a JSON number or a numeric string.
@@ -311,9 +356,10 @@ fn text(obj: &Value, keys: &[&str]) -> Option<String> {
 pub fn parse_positions(v: &Value) -> Vec<Position> {
     let mut out = Vec::new();
     for rec in find_records(v) {
-        let ticker = text(&rec, &["symbol", "ticker", "instrument_symbol", "instrument"])
-            .unwrap_or_default()
-            .to_ascii_uppercase();
+        let ticker = text(&rec, &["symbol", "ticker", "instrument_symbol", "chain_symbol", "instrument"])
+            .map(|s| s.to_ascii_uppercase())
+            .filter(|s| looks_like_ticker(s))
+            .unwrap_or_default();
         if ticker.is_empty() {
             continue;
         }
@@ -337,11 +383,18 @@ pub fn parse_positions(v: &Value) -> Vec<Position> {
 /// Normalize an arbitrary account payload into an `AccountSummary`, if any of the
 /// money fields are present.
 pub fn parse_account(v: &Value) -> Option<AccountSummary> {
-    // Unwrap a single-element wrapper array or a `{ "account": {…} }` shape.
+    // Unwrap a single-element wrapper array, a `{ "account": {…} }` shape, or a
+    // `{ "results": [{…}] }` list (Robinhood's get_accounts/get_portfolio shape).
     let obj = if let Some(a) = v.as_array().and_then(|a| a.first()) {
         a.clone()
     } else if let Some(inner) = v.get("account") {
         inner.clone()
+    } else if let Some(first) = ["results", "data", "accounts"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(Value::as_array))
+        .and_then(|a| a.first())
+    {
+        first.clone()
     } else {
         v.clone()
     };
@@ -359,6 +412,40 @@ pub fn parse_account(v: &Value) -> Option<AccountSummary> {
         cash,
         currency: text(&obj, &["currency"]).unwrap_or_else(|| "USD".to_string()),
     })
+}
+
+/// True when a payload carries no content at all (null, empty array/object, or a
+/// wrapper whose only values are empty arrays) — a legitimately empty result we
+/// should not flag as an unparsed shape.
+fn is_empty_payload(v: &Value) -> bool {
+    match v {
+        Value::Null => true,
+        Value::Array(a) => a.is_empty(),
+        Value::Object(o) => {
+            o.is_empty()
+                || o.values().all(|val| {
+                    matches!(val, Value::Null) || val.as_array().is_some_and(|a| a.is_empty())
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Merge a freshly-parsed account summary into any existing one, filling only the
+/// fields that are still missing so values from different tools can combine.
+fn merge_account(existing: Option<AccountSummary>, next: AccountSummary) -> AccountSummary {
+    match existing {
+        None => next,
+        Some(mut acc) => {
+            acc.portfolio_value = acc.portfolio_value.or(next.portfolio_value);
+            acc.buying_power = acc.buying_power.or(next.buying_power);
+            acc.cash = acc.cash.or(next.cash);
+            if acc.currency == "USD" && next.currency != "USD" {
+                acc.currency = next.currency;
+            }
+            acc
+        }
+    }
 }
 
 /// A connected, read-only Robinhood session built on the MCP client.
@@ -397,57 +484,81 @@ impl RobinhoodClient {
             }
         }
 
-        // Phase 2 — positions, scoped per account_number when the tool requires
-        // it. `select_callable` skips any tool whose required args we can't fill.
+        // Phase 2 — positions. Iterate *every* callable position tool (equity and
+        // option), scoped per account_number when required, and capture the shape
+        // of anything that doesn't parse so a miss can be diagnosed safely.
         let mut positions: Vec<Position> = Vec::new();
-        if let Some(t) = select_callable(&tools, &["position", "holding", "portfolio"], &account_numbers)
-        {
-            if let Ok(calls) = call_args_for(t, &account_numbers) {
-                for args in calls {
-                    if let Ok(res) = self.mcp.call_tool(&t.name, args).await {
-                        positions.extend(parse_positions(&tool_result_value(&res)));
+        let mut diagnostics: Vec<String> = Vec::new();
+        for t in callable_matching(&tools, &["position", "holding"], &account_numbers) {
+            let Ok(calls) = call_args_for(t, &account_numbers) else { continue };
+            let mut got = false;
+            for args in calls {
+                match self.mcp.call_tool(&t.name, args).await {
+                    Ok(res) => {
+                        let val = tool_result_value(&res);
+                        let parsed = parse_positions(&val);
+                        if parsed.is_empty() && !is_empty_payload(&val) {
+                            diagnostics.push(format!("{} → {}", t.name, shape_of(&val)));
+                        }
+                        if !parsed.is_empty() {
+                            positions.extend(parsed);
+                            got = true;
+                        }
                     }
+                    Err(e) => diagnostics.push(format!("{} errored: {e}", t.name)),
                 }
             }
-            if !positions.is_empty() {
+            if got {
                 tools_used.push(t.name.clone());
             }
         }
 
-        // Phase 3 — fill the account summary if phase 1 didn't, including from a
-        // balance/portfolio tool that itself needs the account_number.
-        if account.is_none() {
-            if let Some(t) = select_callable(&tools, &["account", "balance", "portfolio"], &account_numbers)
-            {
-                if let Ok(calls) = call_args_for(t, &account_numbers) {
-                    for args in calls {
-                        if let Ok(res) = self.mcp.call_tool(&t.name, args).await {
-                            if let Some(a) = parse_account(&tool_result_value(&res)) {
-                                account = Some(a);
-                                tools_used.push(t.name.clone());
-                                break;
-                            }
+        // Phase 3 — account summary. Merge fields across every callable
+        // balance/portfolio/account tool so e.g. portfolio_value (get_portfolio)
+        // and cash/buying_power (get_accounts) can come from different calls.
+        for t in callable_matching(&tools, &["portfolio", "balance", "account"], &account_numbers) {
+            let Ok(calls) = call_args_for(t, &account_numbers) else { continue };
+            let mut used = false;
+            for args in calls {
+                match self.mcp.call_tool(&t.name, args).await {
+                    Ok(res) => {
+                        let val = tool_result_value(&res);
+                        if let Some(a) = parse_account(&val) {
+                            account = Some(merge_account(account.take(), a));
+                            used = true;
+                        } else if account.is_none() && !is_empty_payload(&val) {
+                            diagnostics.push(format!("{} → {}", t.name, shape_of(&val)));
                         }
                     }
+                    Err(e) => diagnostics.push(format!("{} errored: {e}", t.name)),
                 }
+            }
+            if used && !tools_used.contains(&t.name) {
+                tools_used.push(t.name.clone());
             }
         }
 
         if positions.is_empty() && account.is_none() {
-            // Surface what the server actually offered (names + required args) so
-            // the selector can be tuned to Robinhood's real API.
+            // Surface what the server actually offered (names + required args) and
+            // the shape of any unparsed responses (keys only — never values) so the
+            // parser can be tuned to Robinhood's real API.
             let available = tools
                 .iter()
                 .map(describe_tool)
                 .collect::<Vec<_>>()
                 .join(", ");
             let hint = if account_numbers.is_empty() {
-                " Couldn't discover an account number from any no-argument tool."
+                " Couldn't discover an account number from any no-argument tool.".to_string()
             } else {
-                ""
+                format!(" Found {} account number(s).", account_numbers.len())
+            };
+            let shapes = if diagnostics.is_empty() {
+                String::new()
+            } else {
+                format!(" Unparsed responses: [{}].", diagnostics.join("; "))
             };
             return Err(AppError::Robinhood(format!(
-                "Connected, but couldn't read positions or account.{hint} \
+                "Connected, but couldn't read positions or account.{hint}{shapes} \
                  Tools the server exposed: [{available}]."
             )));
         }
@@ -514,29 +625,29 @@ mod tests {
     }
 
     #[test]
-    fn select_callable_prefers_positions_then_account() {
+    fn callable_matching_prefers_positions_then_account() {
         let tools = vec![tool("get_account"), tool("list_positions"), tool("place_order")];
         assert_eq!(
-            select_callable(&tools, &["position", "holding"], &[]).unwrap().name,
+            callable_matching(&tools, &["position", "holding"], &[])[0].name,
             "list_positions"
         );
-        assert_eq!(select_callable(&tools, &["account"], &[]).unwrap().name, "get_account");
+        assert_eq!(callable_matching(&tools, &["account"], &[])[0].name, "get_account");
         // A mutating tool is never selected even if the noun matches.
-        assert!(select_callable(&vec![tool("place_order")], &["order"], &[]).is_none());
+        assert!(callable_matching(&vec![tool("place_order")], &["order"], &[]).is_empty());
     }
 
     #[test]
-    fn select_callable_skips_destructive_annotation() {
+    fn callable_matching_skips_destructive_annotation() {
         // Name looks like a benign read, but the server flags it destructive.
         let tools = vec![tool_annotated("get_positions", None, Some(true))];
-        assert!(select_callable(&tools, &["position"], &[]).is_none());
+        assert!(callable_matching(&tools, &["position"], &[]).is_empty());
         // Explicitly non-read-only is likewise refused.
         let tools = vec![tool_annotated("portfolio_view", Some(false), None)];
-        assert!(select_callable(&tools, &["portfolio"], &[]).is_none());
+        assert!(callable_matching(&tools, &["portfolio"], &[]).is_empty());
         // A clean read-only annotation is fine.
         let tools = vec![tool_annotated("list_positions", Some(true), Some(false))];
         assert_eq!(
-            select_callable(&tools, &["position"], &[]).unwrap().name,
+            callable_matching(&tools, &["position"], &[])[0].name,
             "list_positions"
         );
     }
@@ -577,14 +688,14 @@ mod tests {
     }
 
     #[test]
-    fn select_callable_skips_tools_we_cannot_satisfy() {
+    fn callable_matching_skips_tools_we_cannot_satisfy() {
         // The positions tool needs an account number; with none known it's skipped.
         let tools = vec![tool_requiring("get_positions", &["account_number"])];
-        assert!(select_callable(&tools, &["position"], &[]).is_none());
+        assert!(callable_matching(&tools, &["position"], &[]).is_empty());
         // Once we have a number, it becomes callable.
         let nums = vec!["A1".to_string()];
         assert_eq!(
-            select_callable(&tools, &["position"], &nums).unwrap().name,
+            callable_matching(&tools, &["position"], &nums)[0].name,
             "get_positions"
         );
     }
@@ -654,6 +765,87 @@ mod tests {
     #[test]
     fn parse_account_none_when_no_money_fields() {
         assert!(parse_account(&json!({ "id": "abc" })).is_none());
+    }
+
+    #[test]
+    fn parse_account_unwraps_results_wrapper() {
+        // Robinhood's get_accounts shape: a `results` list of account objects.
+        let v = json!({ "results": [{ "account_number": "X1", "buying_power": "42.50" }] });
+        let acct = parse_account(&v).expect("should parse from results wrapper");
+        assert_eq!(acct.buying_power, Some(42.50));
+    }
+
+    #[test]
+    fn find_records_recurses_into_unknown_wrapper() {
+        // No known wrapper key, but a nested array of objects exists.
+        let v = json!({ "payload": { "rows": [{ "symbol": "AAPL", "quantity": 1 }] } });
+        let pos = parse_positions(&v);
+        assert_eq!(pos.len(), 1);
+        assert_eq!(pos[0].ticker, "AAPL");
+    }
+
+    #[test]
+    fn parse_positions_ignores_instrument_url_as_ticker() {
+        // Robinhood raw positions reference an instrument URL, not a symbol —
+        // that URL must not become a garbage ticker.
+        let v = json!([{ "instrument": "https://api.robinhood.com/instruments/abc-123/", "quantity": 5 }]);
+        assert!(parse_positions(&v).is_empty());
+        // But a real short symbol in the same field is accepted.
+        let v = json!([{ "instrument": "AAPL", "quantity": 5 }]);
+        assert_eq!(parse_positions(&v)[0].ticker, "AAPL");
+    }
+
+    #[test]
+    fn looks_like_ticker_rejects_urls_and_long_strings() {
+        assert!(looks_like_ticker("AAPL"));
+        assert!(looks_like_ticker("BRK.B"));
+        assert!(!looks_like_ticker("https://example.com/x"));
+        assert!(!looks_like_ticker("THIS_IS_TOO_LONG"));
+        assert!(!looks_like_ticker(""));
+    }
+
+    #[test]
+    fn shape_of_reports_keys_not_values() {
+        let v = json!({ "buying_power": "999.99", "cash": "1.00" });
+        let s = shape_of(&v);
+        assert!(s.contains("buying_power") && s.contains("cash"));
+        // Never leaks the actual balances.
+        assert!(!s.contains("999.99"));
+
+        let arr = json!([{ "symbol": "AAPL", "quantity": 3 }]);
+        let s = shape_of(&arr);
+        assert!(s.starts_with("array[1] of object"));
+        assert!(s.contains("symbol") && !s.contains("AAPL"));
+    }
+
+    #[test]
+    fn merge_account_fills_missing_fields_across_tools() {
+        let from_portfolio = AccountSummary {
+            portfolio_value: Some(1000.0),
+            buying_power: None,
+            cash: None,
+            currency: "USD".into(),
+        };
+        let from_accounts = AccountSummary {
+            portfolio_value: None,
+            buying_power: Some(50.0),
+            cash: Some(10.0),
+            currency: "USD".into(),
+        };
+        let merged = merge_account(Some(from_portfolio), from_accounts);
+        assert_eq!(merged.portfolio_value, Some(1000.0));
+        assert_eq!(merged.buying_power, Some(50.0));
+        assert_eq!(merged.cash, Some(10.0));
+    }
+
+    #[test]
+    fn is_empty_payload_distinguishes_empty_from_populated() {
+        assert!(is_empty_payload(&json!(null)));
+        assert!(is_empty_payload(&json!([])));
+        assert!(is_empty_payload(&json!({})));
+        assert!(is_empty_payload(&json!({ "results": [] })));
+        assert!(!is_empty_payload(&json!({ "buying_power": "10" })));
+        assert!(!is_empty_payload(&json!([{ "symbol": "AAPL" }])));
     }
 
     #[test]
