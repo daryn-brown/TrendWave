@@ -2,6 +2,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   Portfolio,
   ProgressEvent,
+  QuestradeStatus,
   ResearchResult,
   RobinhoodStatus,
   Settings,
@@ -60,3 +61,15 @@ export const biometricAvailable = () => invoke<boolean>("biometric_available");
 export const biometricUnlock = () => invoke<boolean>("biometric_unlock");
 
 export const robinhoodPortfolio = () => invoke<Portfolio>("robinhood_portfolio");
+
+// --- Questrade (read-only REST integration) --------------------------------
+
+export const questradeStatus = () => invoke<QuestradeStatus>("questrade_status");
+
+// Exchanges the pasted manual authorization token; resolves once connected + first snapshot.
+export const questradeConnect = (token: string) =>
+  invoke<QuestradeStatus>("questrade_connect", { token });
+
+export const questradeDisconnect = () => invoke<void>("questrade_disconnect");
+
+export const questradePortfolio = () => invoke<Portfolio>("questrade_portfolio");

@@ -6,6 +6,7 @@ import type {
   Candidate,
   GrowthData,
   Portfolio,
+  QuestradeStatus,
   RobinhoodStatus,
   Settings,
   Watchlist,
@@ -84,6 +85,41 @@ export const IconMoon = ({ className = base }: IconProps) => (
 export const IconLock = ({ className = base }: IconProps) => (
   <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </svg>
+);
+
+// ---- Broker brand marks (filled monogram badges, so the two connections are
+// visually distinct at a glance) --------------------------------------------
+export const IconRobinhood = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#00C805" />
+    <text
+      x="12"
+      y="16.7"
+      textAnchor="middle"
+      fontFamily="ui-sans-serif, system-ui, -apple-system, sans-serif"
+      fontSize="13"
+      fontWeight="700"
+      fill="#ffffff"
+    >
+      R
+    </text>
+  </svg>
+);
+export const IconQuestrade = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+    <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#0B63CE" />
+    <text
+      x="12"
+      y="16.7"
+      textAnchor="middle"
+      fontFamily="ui-sans-serif, system-ui, -apple-system, sans-serif"
+      fontSize="13"
+      fontWeight="700"
+      fill="#ffffff"
+    >
+      Q
+    </text>
   </svg>
 );
 
@@ -606,6 +642,10 @@ export function SettingsModal({
   onConnectRobinhood,
   onDisconnectRobinhood,
   biometricAvailable,
+  questrade,
+  questradeBusy,
+  onConnectQuestrade,
+  onDisconnectQuestrade,
 }: {
   settings: Settings;
   onSave: (s: Settings) => void;
@@ -615,6 +655,10 @@ export function SettingsModal({
   onConnectRobinhood: () => void;
   onDisconnectRobinhood: () => void;
   biometricAvailable: boolean;
+  questrade: QuestradeStatus | null;
+  questradeBusy: boolean;
+  onConnectQuestrade: (token: string) => void;
+  onDisconnectQuestrade: () => void;
 }) {
   const [form, setForm] = useState<Settings>(settings);
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
@@ -651,6 +695,12 @@ export function SettingsModal({
             requireBiometric={form.require_biometric_unlock}
             onToggleRequireBiometric={(v) => update("require_biometric_unlock", v)}
           />
+          <QuestradeSection
+            status={questrade}
+            busy={questradeBusy}
+            onConnect={onConnectQuestrade}
+            onDisconnect={onDisconnectQuestrade}
+          />
         </div>
 
         <div className="mt-6 flex justify-end gap-2">
@@ -666,7 +716,20 @@ export function SettingsModal({
   );
 }
 
-// ---- Robinhood (read-only) --------------------------------------------------
+// ---- Broker connections (read-only) ----------------------------------------
+
+export type BrokerKind = "robinhood" | "questrade";
+
+function BrokerIcon({ broker, className }: { broker: BrokerKind; className?: string }) {
+  return broker === "robinhood" ? (
+    <IconRobinhood className={className} />
+  ) : (
+    <IconQuestrade className={className} />
+  );
+}
+
+const brokerLabel = (broker: BrokerKind) =>
+  broker === "robinhood" ? "Robinhood" : "Questrade";
 
 function RobinhoodSection({
   status,
@@ -689,13 +752,16 @@ function RobinhoodSection({
   return (
     <div className="rounded-2xl border border-slate-200 p-3 dark:border-slate-800">
       <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Robinhood</p>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
-            {connected
-              ? "Connected · read-only"
-              : "Use your holdings as research context"}
-          </p>
+        <div className="flex items-center gap-2">
+          <IconRobinhood className="h-6 w-6 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Robinhood</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {connected
+                ? "Connected · read-only"
+                : "Use your holdings as research context"}
+            </p>
+          </div>
         </div>
         {connected ? (
           <button
@@ -739,6 +805,90 @@ function RobinhoodSection({
   );
 }
 
+function QuestradeSection({
+  status,
+  busy,
+  onConnect,
+  onDisconnect,
+}: {
+  status: QuestradeStatus | null;
+  busy: boolean;
+  onConnect: (token: string) => void;
+  onDisconnect: () => void;
+}) {
+  const connected = status?.connected ?? false;
+  const [token, setToken] = useState("");
+
+  return (
+    <div className="rounded-2xl border border-slate-200 p-3 dark:border-slate-800">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <IconQuestrade className="h-6 w-6 shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Questrade</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {connected
+                ? "Connected · read-only"
+                : "Use your holdings as research context"}
+            </p>
+          </div>
+        </div>
+        {connected && (
+          <button
+            onClick={onDisconnect}
+            disabled={busy}
+            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+          >
+            Disconnect
+          </button>
+        )}
+      </div>
+
+      {connected ? (
+        <p className="mt-2 text-[11px] leading-4 text-slate-400 dark:text-slate-500">
+          Read-only. TrendWave reads your positions to flag picks you already own — it can’t place,
+          modify, or cancel trades.
+        </p>
+      ) : (
+        <div className="mt-3 space-y-2">
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && token.trim()) onConnect(token.trim());
+            }}
+            placeholder="Manual authorization token"
+            className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
+          />
+          <button
+            onClick={() => onConnect(token.trim())}
+            disabled={busy || !token.trim()}
+            className="w-full rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
+          >
+            {busy ? "Connecting…" : "Connect"}
+          </button>
+          <p className="text-[11px] leading-4 text-slate-400 dark:text-slate-500">
+            In Questrade, open{" "}
+            <button
+              onClick={() =>
+                openUrl("https://www.questrade.com/api/documentation/getting-started").catch(
+                  () => {},
+                )
+              }
+              className="font-medium text-sky-600 hover:underline dark:text-sky-400"
+            >
+              API centre
+            </button>{" "}
+            → register a personal app → generate a manual authorization token, then paste it above.
+            Read-only: TrendWave can’t place, modify, or cancel trades.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /// A tiny inline price sparkline, stroked green when up / red when down.
 function Sparkline({ data, positive }: { data: number[]; positive: boolean }) {
   if (!data || data.length < 2) return null;
@@ -774,10 +924,12 @@ export function PortfolioPanel({
   portfolio,
   busy,
   onRefresh,
+  broker,
 }: {
   portfolio: Portfolio;
   busy: boolean;
   onRefresh: () => void;
+  broker: BrokerKind;
 }) {
   const acct = portfolio.account;
   const held = portfolio.positions
@@ -800,8 +952,9 @@ export function PortfolioPanel({
     <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_18px_50px_-40px_rgba(0,0,0,0.8)]">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
+          <BrokerIcon broker={broker} className="h-5 w-5 shrink-0" />
           <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-            Your portfolio
+            Your {brokerLabel(broker)} portfolio
           </h2>
           <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/25">
             Read-only
@@ -908,8 +1061,9 @@ export function PortfolioLocked({ busy, onUnlock }: { busy: boolean; onUnlock: (
     <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_18px_50px_-40px_rgba(0,0,0,0.8)]">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
+          <IconRobinhood className="h-5 w-5 shrink-0" />
           <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-            Your portfolio
+            Your Robinhood portfolio
           </h2>
           <span className="flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/25">
             <IconLock className="h-3 w-3" /> Locked
@@ -931,13 +1085,22 @@ export function PortfolioLocked({ busy, onUnlock }: { busy: boolean; onUnlock: (
   );
 }
 
-export function PortfolioEmpty({ busy, onLoad }: { busy: boolean; onLoad: () => void }) {
+export function PortfolioEmpty({
+  busy,
+  onLoad,
+  broker,
+}: {
+  busy: boolean;
+  onLoad: () => void;
+  broker: BrokerKind;
+}) {
   return (
     <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_18px_50px_-40px_rgba(0,0,0,0.8)]">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
+          <BrokerIcon broker={broker} className="h-5 w-5 shrink-0" />
           <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-            Your portfolio
+            Your {brokerLabel(broker)} portfolio
           </h2>
           <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/25">
             Connected · read-only
