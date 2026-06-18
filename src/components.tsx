@@ -72,8 +72,13 @@ export const IconDownload = ({ className = base }: IconProps) => (
 
 // ---- Formatting helpers -----------------------------------------------------
 
-export const formatPrice = (price: number, currency: string) =>
-  new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD" }).format(price);
+export const formatPrice = (price: number, currency: string) => {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "USD" }).format(price);
+  } catch {
+    return `${price.toFixed(2)} ${currency}`;
+  }
+};
 
 export const formatPct = (pct: number) => `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
 
