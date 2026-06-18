@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Toggleable (class-based) dark mode: `dark:` utilities apply under `.dark`. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 html,
 body,
 #root {
@@ -8,5 +11,14 @@ body,
 
 body {
   margin: 0;
+}
+
+/* Pre-mount background so there's no flash before React paints the gradient. */
+html {
+  background-color: #f8fafc;
+}
+
+html.dark {
+  background-color: #020617;
 }
 

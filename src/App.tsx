@@ -25,6 +25,7 @@ import type {
   Watchlist,
 } from "./types";
 import { checkForUpdate, downloadAndInstall, relaunch, Update } from "./updater";
+import { useTheme } from "./theme";
 
 const EXAMPLES = [
   "Where are the bottlenecks in the AI data-center buildout?",
@@ -51,6 +52,8 @@ export default function App() {
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase | null>(null);
   const [updateProgress, setUpdateProgress] = useState(0);
   const [updateToast, setUpdateToast] = useState<string | null>(null);
+
+  const { theme, toggle: toggleTheme } = useTheme();
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
@@ -221,7 +224,7 @@ export default function App() {
   const hasResults = bottlenecks.length > 0 || candidates.length > 0;
 
   return (
-    <div className="flex h-full bg-[radial-gradient(circle_at_top,_#eff6ff,_#f8fafc_60%)] text-slate-900">
+    <div className="flex h-full bg-[radial-gradient(circle_at_top,_#eff6ff,_#f8fafc_60%)] text-slate-900 dark:bg-[radial-gradient(circle_at_top,_#0b1220,_#020617_60%)] dark:text-slate-100">
       <WatchlistSidebar
         watchlists={watchlists}
         activeId={activeId}
@@ -230,6 +233,8 @@ export default function App() {
         onNew={handleNew}
         onOpenSettings={() => setShowSettings(true)}
         onCheckUpdates={handleCheckUpdates}
+        theme={theme}
+        onToggleTheme={toggleTheme}
       />
 
       <main className="flex-1 overflow-y-auto">
@@ -246,7 +251,7 @@ export default function App() {
           )}
           <header>
             <h1 className="text-2xl font-bold tracking-tight">Find the bottleneck. Find the stock.</h1>
-            <p className="mt-1 text-sm text-slate-500">
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
               Ask about an industry. TrendWave finds the supply chokepoints, then the public companies
               best positioned to solve or monopolize them — ranked by real revenue &amp; earnings growth
               (SEC EDGAR) and competitive positioning, reasoned locally via Ollama.
@@ -266,7 +271,7 @@ export default function App() {
                 <button
                   key={ex}
                   onClick={() => handleSearch(ex)}
-                  className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5 text-xs text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                  className="rounded-full border border-slate-200 bg-white/70 px-3 py-1.5 text-xs text-slate-600 hover:border-sky-300 hover:text-sky-700 dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-300 dark:hover:border-sky-500/50 dark:hover:text-sky-400"
                 >
                   {ex}
                 </button>
@@ -293,7 +298,7 @@ export default function App() {
 
           {candidates.length > 0 && (
             <section className="space-y-3">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
                 Stock picks ({candidates.length})
               </h3>
               <div className="space-y-4">
@@ -305,14 +310,14 @@ export default function App() {
           )}
 
           {result && candidates.length === 0 && !running && (
-            <p className="rounded-2xl border border-slate-200 bg-white/70 p-4 text-sm text-slate-500">
+            <p className="rounded-2xl border border-slate-200 bg-white/70 p-4 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-400">
               No stock picks came back this time — the model didn't return usable tickers. Try
               rephrasing the industry or re-running.
             </p>
           )}
 
           {result?.disclaimer && (
-            <p className="pt-2 text-xs leading-5 text-slate-400">{result.disclaimer}</p>
+            <p className="pt-2 text-xs leading-5 text-slate-400 dark:text-slate-500">{result.disclaimer}</p>
           )}
         </div>
       </main>
@@ -331,7 +336,7 @@ export default function App() {
       )}
 
       {updateToast && (
-        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-xs font-medium text-white shadow-lg">
+        <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-xs font-medium text-white shadow-lg dark:bg-slate-800 dark:ring-1 dark:ring-slate-700">
           {updateToast}
         </div>
       )}
@@ -351,7 +356,7 @@ function PromptBar({
   onSubmit: () => void;
 }) {
   return (
-    <div className="flex items-end gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm focus-within:border-sky-300">
+    <div className="flex items-end gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-sm focus-within:border-sky-300 dark:border-slate-800 dark:bg-slate-900 dark:focus-within:border-sky-500/60">
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -363,12 +368,12 @@ function PromptBar({
         }}
         rows={2}
         placeholder="Where are the bottlenecks in…?"
-        className="flex-1 resize-none bg-transparent px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+        className="flex-1 resize-none bg-transparent px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none dark:text-slate-100 dark:placeholder:text-slate-500"
       />
       <button
         onClick={onSubmit}
         disabled={running || !value.trim()}
-        className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+        className="flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
       >
         {running ? <IconSpinner /> : <IconSearch />}
         {running ? "Researching" : "Search"}
@@ -393,10 +398,10 @@ function ResultsHeader({
   onSave: () => void;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white/80 p-5">
+    <div className="rounded-2xl border border-slate-200 bg-white/80 p-5 dark:border-slate-800 dark:bg-slate-900/70">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2">
-          <IconSparkles className="h-5 w-5 text-sky-600" />
+          <IconSparkles className="h-5 w-5 text-sky-600 dark:text-sky-400" />
           <h2 className="text-lg font-semibold capitalize">{result?.industry || "Research"}</h2>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -404,7 +409,7 @@ function ResultsHeader({
             <button
               onClick={onRerun}
               disabled={running}
-              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               <IconRefresh className="h-3.5 w-3.5" /> Re-run
             </button>
@@ -412,14 +417,14 @@ function ResultsHeader({
           {activeId == null && canSave && (
             <button
               onClick={onSave}
-              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+              className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               Save watchlist
             </button>
           )}
         </div>
       </div>
-      {result?.summary && <p className="mt-2 text-sm leading-6 text-slate-600">{result.summary}</p>}
+      {result?.summary && <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">{result.summary}</p>}
     </div>
   );
 }
@@ -436,26 +441,26 @@ function SaveDialog({
   onCancel: () => void;
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4" onClick={onCancel}>
-      <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 dark:bg-black/60" onClick={onCancel}>
+      <div className="w-full max-w-sm rounded-3xl bg-white p-6 shadow-2xl dark:bg-slate-900 dark:ring-1 dark:ring-slate-800" onClick={(e) => e.stopPropagation()}>
         <h2 className="text-lg font-bold">Save watchlist</h2>
-        <p className="mt-1 text-sm text-slate-500">Name this search so you can re-run it later.</p>
+        <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Name this search so you can re-run it later.</p>
         <input
           autoFocus
           value={name}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && onConfirm()}
           placeholder="e.g. AI data-center bottlenecks"
-          className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none"
+          className="mt-4 w-full rounded-xl border border-slate-200 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:placeholder:text-slate-500"
         />
         <div className="mt-5 flex justify-end gap-2">
-          <button onClick={onCancel} className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100">
+          <button onClick={onCancel} className="rounded-xl px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800">
             Cancel
           </button>
           <button
             onClick={onConfirm}
             disabled={!name.trim()}
-            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40"
+            className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
           >
             Save
           </button>
