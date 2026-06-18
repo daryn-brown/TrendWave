@@ -244,7 +244,7 @@ fn describe_tool(t: &ToolInfo) -> String {
 /// Describe the *shape* of a tool response — its keys only, never its values —
 /// so a parsing miss can be diagnosed without leaking holdings or balances.
 fn shape_of(v: &Value) -> String {
-    shape_of_depth(v, 2)
+    shape_of_depth(v, 3)
 }
 
 /// Structural description of a JSON value to `depth` levels: object keys, array
@@ -562,6 +562,11 @@ pub struct RobinhoodClient {
 /// Most intraday points we keep for a row's sparkline (newest retained).
 const SPARK_MAX_POINTS: usize = 48;
 
+/// Symbols per `get_equity_historicals` call. The server rejects large batches
+/// ("too many symbols … split your request into smaller batches"), so we keep
+/// each request conservatively small and merge the results.
+const HISTORICAL_BATCH: usize = 5;
+
 /// A lightweight quote: enough to value a holding and show today's change.
 #[derive(Debug, Clone, Default)]
 struct Quote {
@@ -651,6 +656,32 @@ fn parse_quotes(v: &Value) -> HashMap<String, Quote> {
             let sym = k.to_ascii_uppercase();
             if rec.is_object() && looks_like_ticker(&sym) {
                 out.insert(sym, quote_fields(rec));
+            }
+        }
+    }
+    out
+}
+
+/// Fallback for quote responses whose records carry no usable symbol field and
+/// are instead returned **positionally**, in the same order the symbols were
+/// requested (Robinhood's `results` array, which keeps a slot — possibly null —
+/// per requested symbol). Only zips when the counts line up, so misaligned
+/// responses are left for the keyed parser rather than mislabeled.
+fn parse_quotes_positional(v: &Value, symbols: &[String]) -> HashMap<String, Quote> {
+    let v = unwrap_envelope(v);
+    let records = find_records(&v);
+    let mut out = HashMap::new();
+    if records.is_empty() || records.len() != symbols.len() {
+        return out;
+    }
+    for (sym, rec) in symbols.iter().zip(records.iter()) {
+        if rec.is_object() {
+            let q = quote_fields(rec);
+            // Require a price: if the element uses an unrecognized price key we'd
+            // rather report nothing (and surface the shape) than label a holding
+            // with a blank value and no diagnostic.
+            if q.price.is_some() {
+                out.insert(sym.to_ascii_uppercase(), q);
             }
         }
     }
@@ -879,7 +910,7 @@ impl RobinhoodClient {
                 if quotes.is_empty() {
                     debug.push(format!("{} returned no usable quotes", t.name));
                 } else {
-                    let mut matched = 0usize;
+                    let mut priced = 0usize;
                     for p in positions.iter_mut() {
                         if let Some(q) = quotes.get(&p.ticker) {
                             if let Some(price) = q.price {
@@ -887,62 +918,41 @@ impl RobinhoodClient {
                                 if p.market_value.is_none() {
                                     p.market_value = Some(price * p.quantity);
                                 }
+                                priced += 1;
                             }
                             p.change_pct = q.change_pct.or(p.change_pct);
-                            matched += 1;
                         }
                     }
-                    if matched > 0 {
+                    if priced > 0 {
                         tools_used.push(t.name.clone());
                     }
-                    if matched < symbols.len() {
-                        debug.push(format!("priced {}/{} holdings", matched, symbols.len()));
+                    if priced < symbols.len() {
+                        debug.push(format!("priced {}/{} holdings", priced, symbols.len()));
                     }
                 }
             }
         }
 
-        // Historicals → an intraday sparkline series. The window starts a few days
-        // back so the most recent trading session is captured even on a Monday or
-        // after a holiday; the series is trimmed to its most-recent tail.
+        // Historicals → an intraday sparkline series. Chunked because the server
+        // caps how many symbols one call may request; the window starts a few days
+        // back so the most recent session is captured even on a Monday or after a
+        // holiday, and each series is trimmed to its most-recent tail.
         if let Some(t) = find_named(tools, &["equit", "historical"]) {
-            let mut args = serde_json::Map::new();
-            args.insert("symbols".into(), symbols_value(t, symbols));
-            let start = chrono::Utc::now() - chrono::Duration::days(4);
-            args.insert(
-                "start_time".into(),
-                json!(start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-            );
-            for (k, v) in [("interval", "5minute"), ("bounds", "regular"), ("span", "day")] {
-                if schema_has_prop(t, k) {
-                    args.insert(k.into(), json!(v));
-                }
-            }
-            match self.mcp.call_tool(&t.name, Value::Object(args)).await {
-                Err(e) => debug.push(format!("{}: {}", t.name, redact_nums(&e.to_string()))),
-                Ok(res) => {
-                    let val = tool_result_value(&res);
-                    let series = parse_historicals(&val);
-                    if series.is_empty() {
-                        if !is_empty_payload(&val) {
-                            debug.push(format!("{} → {}", t.name, shape_preview(&val)));
-                        }
-                    } else {
-                        for p in positions.iter_mut() {
-                            if let Some(s) = series.get(&p.ticker) {
-                                p.spark = s.clone();
-                                if p.change_pct.is_none() {
-                                    if let (Some(first), Some(last)) = (s.first(), s.last()) {
-                                        if *first != 0.0 {
-                                            p.change_pct = Some((last - first) / first * 100.0);
-                                        }
-                                    }
+            let series = self.fetch_historicals(t, symbols, &mut debug).await;
+            if !series.is_empty() {
+                for p in positions.iter_mut() {
+                    if let Some(s) = series.get(&p.ticker) {
+                        p.spark = s.clone();
+                        if p.change_pct.is_none() {
+                            if let (Some(first), Some(last)) = (s.first(), s.last()) {
+                                if *first != 0.0 {
+                                    p.change_pct = Some((last - first) / first * 100.0);
                                 }
                             }
                         }
-                        tools_used.push(t.name.clone());
                     }
                 }
+                tools_used.push(t.name.clone());
             }
         }
 
@@ -964,7 +974,10 @@ impl RobinhoodClient {
         match self.mcp.call_tool(&t.name, json!({ "symbols": symbols_value(t, symbols) })).await {
             Ok(res) => {
                 let val = tool_result_value(&res);
-                let quotes = parse_quotes(&val);
+                let mut quotes = parse_quotes(&val);
+                if quotes.is_empty() {
+                    quotes = parse_quotes_positional(&val, symbols);
+                }
                 if quotes.is_empty() && !is_empty_payload(&val) {
                     debug.push(format!("{} → {}", t.name, shape_preview(&val)));
                 }
@@ -975,8 +988,62 @@ impl RobinhoodClient {
                 // symbol only costs its chunk, not the entire portfolio.
                 for chunk in symbols.chunks(8) {
                     match self.mcp.call_tool(&t.name, json!({ "symbols": symbols_value(t, chunk) })).await {
-                        Ok(res) => out.extend(parse_quotes(&tool_result_value(&res))),
+                        Ok(res) => {
+                            let val = tool_result_value(&res);
+                            let mut q = parse_quotes(&val);
+                            if q.is_empty() {
+                                q = parse_quotes_positional(&val, chunk);
+                            }
+                            out.extend(q);
+                        }
                         Err(e) => debug.push(format!("{} rejected [{}]: {}", t.name, chunk.join(","), redact_nums(&e.to_string()))),
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Fetch intraday historicals in small batches because the server caps how
+    /// many symbols a single call may request. Merges every batch into one
+    /// `ticker → series` map; records at most one diagnostic so a systemic
+    /// failure doesn't flood the debug channel.
+    async fn fetch_historicals(
+        &self,
+        t: &ToolInfo,
+        symbols: &[String],
+        debug: &mut Vec<String>,
+    ) -> HashMap<String, Vec<f64>> {
+        let mut out = HashMap::new();
+        let start = chrono::Utc::now() - chrono::Duration::days(4);
+        let start_str = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut noted = false;
+        for chunk in symbols.chunks(HISTORICAL_BATCH) {
+            let mut args = serde_json::Map::new();
+            args.insert("symbols".into(), symbols_value(t, chunk));
+            args.insert("start_time".into(), json!(start_str));
+            for (k, v) in [("interval", "5minute"), ("bounds", "regular"), ("span", "day")] {
+                if schema_has_prop(t, k) {
+                    args.insert(k.into(), json!(v));
+                }
+            }
+            match self.mcp.call_tool(&t.name, Value::Object(args)).await {
+                Err(e) => {
+                    if !noted {
+                        debug.push(format!("{}: {}", t.name, redact_nums(&e.to_string())));
+                        noted = true;
+                    }
+                }
+                Ok(res) => {
+                    let val = tool_result_value(&res);
+                    let series = parse_historicals(&val);
+                    if series.is_empty() {
+                        if !noted && !is_empty_payload(&val) {
+                            debug.push(format!("{} → {}", t.name, shape_preview(&val)));
+                            noted = true;
+                        }
+                    } else {
+                        out.extend(series);
                     }
                 }
             }
@@ -1451,6 +1518,39 @@ mod tests {
         }
         // The structural commas survive so a CSV format is recognizable.
         assert!(s.contains(","));
+    }
+
+
+    #[test]
+    fn parse_quotes_positional_zips_records_to_requested_symbols() {
+        // The live shape: data.results is a 1:1 positional array with no symbol
+        // field on each record (and a sibling closes_error).
+        let v = json!({
+            "data": {
+                "closes_error": "could not compute closes",
+                "results": [
+                    { "last_trade_price": "100.0" },
+                    { "last_trade_price": "200.0", "previous_close": "190.0" },
+                ],
+            },
+            "guide": "text",
+        });
+        let symbols = vec!["AAPL".to_string(), "MSFT".to_string()];
+        // The keyed parser can't find symbols on these records…
+        assert!(parse_quotes(&v).is_empty());
+        // …but the positional parser aligns them to the request order.
+        let q = parse_quotes_positional(&v, &symbols);
+        assert_eq!(q.get("AAPL").unwrap().price, Some(100.0));
+        assert_eq!(q.get("MSFT").unwrap().price, Some(200.0));
+        assert!((q.get("MSFT").unwrap().change_pct.unwrap() - 5.263).abs() < 1e-2);
+    }
+
+    #[test]
+    fn parse_quotes_positional_refuses_on_length_mismatch() {
+        let v = json!({ "data": { "results": [{ "last_trade_price": "1.0" }] } });
+        // Two requested but one record back → don't risk a mislabel.
+        let symbols = vec!["AAPL".to_string(), "MSFT".to_string()];
+        assert!(parse_quotes_positional(&v, &symbols).is_empty());
     }
 
 
