@@ -50,11 +50,14 @@ impl AppState {
         if !biometric::is_available() {
             return Ok(false);
         }
-        let require = {
+        let (require, connected) = {
             let conn = self.lock_db()?;
-            db::load_settings(&conn)?.require_biometric_unlock
+            (
+                db::load_settings(&conn)?.require_biometric_unlock,
+                db::get_flag(&conn, db::FLAG_ROBINHOOD_CONNECTED)?,
+            )
         };
-        if !require || !oauth::is_connected() {
+        if !require || !connected {
             return Ok(false);
         }
         Ok(!self.unlocked.load(Ordering::Relaxed))
@@ -133,13 +136,17 @@ pub struct RobinhoodStatus {
 #[tauri::command]
 pub async fn robinhood_status(state: State<'_, AppState>) -> AppResult<RobinhoodStatus> {
     let locked = state.portfolio_locked()?;
+    let connected = {
+        let conn = state.lock_db()?;
+        db::get_flag(&conn, db::FLAG_ROBINHOOD_CONNECTED)?
+    };
     let portfolio = if locked {
         None
     } else {
         state.robinhood.lock().ok().and_then(|guard| guard.clone())
     };
     Ok(RobinhoodStatus {
-        connected: oauth::is_connected(),
+        connected,
         locked,
         portfolio,
     })
@@ -164,6 +171,10 @@ pub async fn robinhood_connect(
     // The user just completed an interactive sign-in, so they're plainly present
     // — unlock the session now and let the biometric gate apply on later launches.
     state.unlocked.store(true, Ordering::Relaxed);
+    {
+        let conn = state.lock_db()?;
+        db::set_flag(&conn, db::FLAG_ROBINHOOD_CONNECTED, true)?;
+    }
 
     let portfolio = robinhood_fetch_and_cache(&state).await.ok();
     Ok(RobinhoodStatus {
@@ -177,6 +188,10 @@ pub async fn robinhood_connect(
 pub async fn robinhood_disconnect(state: State<'_, AppState>) -> AppResult<()> {
     oauth::clear_auth()?;
     state.unlocked.store(false, Ordering::Relaxed);
+    {
+        let conn = state.lock_db()?;
+        db::set_flag(&conn, db::FLAG_ROBINHOOD_CONNECTED, false)?;
+    }
     if let Ok(mut guard) = state.robinhood.lock() {
         *guard = None;
     }
@@ -213,7 +228,18 @@ pub async fn biometric_unlock(state: State<'_, AppState>) -> AppResult<bool> {
 
 /// Pull a read-only portfolio via the MCP client and cache it for enrichment.
 async fn robinhood_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
-    let token = oauth::ensure_access_token(&state.http).await?;
+    let token = match oauth::ensure_access_token(&state.http).await {
+        Ok(token) => token,
+        Err(err @ AppError::RobinhoodNotConnected) => {
+            // The keychain says we are not actually connected — clear the marker
+            // so status stops advertising a session that no longer exists.
+            if let Ok(conn) = state.lock_db() {
+                let _ = db::set_flag(&conn, db::FLAG_ROBINHOOD_CONNECTED, false);
+            }
+            return Err(err);
+        }
+        Err(err) => return Err(err),
+    };
     let client = RobinhoodClient::new(state.http.clone(), token);
     let portfolio = client.fetch_portfolio().await?;
     if let Ok(mut guard) = state.robinhood.lock() {
@@ -231,13 +257,17 @@ pub struct QuestradeStatus {
 
 #[tauri::command]
 pub async fn questrade_status(state: State<'_, AppState>) -> AppResult<QuestradeStatus> {
+    let connected = {
+        let conn = state.lock_db()?;
+        db::get_flag(&conn, db::FLAG_QUESTRADE_CONNECTED)?
+    };
     let portfolio = state
         .questrade
         .lock()
         .ok()
         .and_then(|guard| guard.clone());
     Ok(QuestradeStatus {
-        connected: questrade::is_connected(),
+        connected,
         portfolio,
     })
 }
@@ -251,6 +281,10 @@ pub async fn questrade_connect(
     token: String,
 ) -> AppResult<QuestradeStatus> {
     questrade::connect(&state.http, &token).await?;
+    {
+        let conn = state.lock_db()?;
+        db::set_flag(&conn, db::FLAG_QUESTRADE_CONNECTED, true)?;
+    }
     let portfolio = questrade_fetch_and_cache(&state).await.ok();
     Ok(QuestradeStatus {
         connected: true,
@@ -261,6 +295,10 @@ pub async fn questrade_connect(
 #[tauri::command]
 pub async fn questrade_disconnect(state: State<'_, AppState>) -> AppResult<()> {
     questrade::clear_auth()?;
+    {
+        let conn = state.lock_db()?;
+        db::set_flag(&conn, db::FLAG_QUESTRADE_CONNECTED, false)?;
+    }
     if let Ok(mut guard) = state.questrade.lock() {
         *guard = None;
     }
@@ -275,7 +313,16 @@ pub async fn questrade_portfolio(state: State<'_, AppState>) -> AppResult<Portfo
 
 /// Pull a read-only portfolio via the Questrade REST client and cache it.
 async fn questrade_fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
-    let (access_token, api_server) = questrade::ensure_session(&state.http).await?;
+    let (access_token, api_server) = match questrade::ensure_session(&state.http).await {
+        Ok(session) => session,
+        Err(err @ AppError::QuestradeNotConnected) => {
+            if let Ok(conn) = state.lock_db() {
+                let _ = db::set_flag(&conn, db::FLAG_QUESTRADE_CONNECTED, false);
+            }
+            return Err(err);
+        }
+        Err(err) => return Err(err),
+    };
     let client = QuestradeClient::new(state.http.clone(), access_token, api_server);
     let portfolio = client.fetch_portfolio().await?;
     if let Ok(mut guard) = state.questrade.lock() {
@@ -317,8 +364,11 @@ pub async fn questrade_find_listing(
     state: State<'_, AppState>,
     symbol: String,
 ) -> AppResult<Option<Listing>> {
-    if !questrade::is_connected() {
-        return Err(AppError::QuestradeNotConnected);
+    {
+        let conn = state.lock_db()?;
+        if !db::get_flag(&conn, db::FLAG_QUESTRADE_CONNECTED)? {
+            return Err(AppError::QuestradeNotConnected);
+        }
     }
     let (access_token, api_server) = questrade::ensure_session(&state.http).await?;
     let client = QuestradeClient::new(state.http.clone(), access_token, api_server);

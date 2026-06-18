@@ -34,6 +34,17 @@ pub fn run() {
             let conn = rusqlite::Connection::open(data_dir.join("trendwave.db"))?;
             db::init(&conn)?;
 
+            // One-time migration: default the biometric gate ON for existing
+            // installs (fresh installs already default it on). Tracked by a flag
+            // outside the Settings blob so a later opt-out via Settings isn't
+            // re-forced on the next launch.
+            if !db::get_flag(&conn, db::FLAG_BIO_DEFAULT_MIGRATED)? {
+                let mut settings = db::load_settings(&conn)?;
+                settings.require_biometric_unlock = true;
+                db::save_settings(&conn, &settings)?;
+                db::set_flag(&conn, db::FLAG_BIO_DEFAULT_MIGRATED, true)?;
+            }
+
             // One shared HTTP client. A short connect timeout makes a dead Ollama
             // (or offline machine) fail fast, while a long overall timeout leaves
             // room for slow local-model generation.
