@@ -707,6 +707,37 @@ function RobinhoodSection({
   );
 }
 
+/// A tiny inline price sparkline, stroked green when up / red when down.
+function Sparkline({ data, positive }: { data: number[]; positive: boolean }) {
+  if (!data || data.length < 2) return null;
+  const w = 60;
+  const h = 20;
+  const pad = 2;
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const points = data
+    .map((v, i) => {
+      const x = pad + (i / (data.length - 1)) * (w - pad * 2);
+      const y = pad + (1 - (v - min) / range) * (h - pad * 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const stroke = positive ? "#10b981" : "#ef4444";
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden="true" className="shrink-0">
+      <polyline
+        points={points}
+        fill="none"
+        stroke={stroke}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export function PortfolioPanel({
   portfolio,
   busy,
@@ -768,26 +799,58 @@ export function PortfolioPanel({
               <tr className="bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-400 dark:bg-slate-800/60 dark:text-slate-500">
                 <th className="px-3 py-2 font-medium">Ticker</th>
                 <th className="px-3 py-2 text-right font-medium">Qty</th>
+                <th className="px-3 py-2 text-right font-medium">Today</th>
                 <th className="px-3 py-2 text-right font-medium">Value</th>
               </tr>
             </thead>
             <tbody>
-              {held.map((p) => (
-                <tr key={p.ticker} className="border-t border-slate-100 dark:border-slate-800">
-                  <td className="px-3 py-2">
-                    <span className="font-semibold text-slate-900 dark:text-slate-100">{p.ticker}</span>
-                    {p.name && (
-                      <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">{p.name}</span>
-                    )}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
-                    {p.quantity}
-                  </td>
-                  <td className="px-3 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">
-                    {p.market_value == null ? "—" : formatPrice(p.market_value, p.currency)}
-                  </td>
-                </tr>
-              ))}
+              {held.map((p) => {
+                const chg = p.change_pct;
+                const positive =
+                  chg != null
+                    ? chg >= 0
+                    : p.spark && p.spark.length > 1
+                      ? p.spark[p.spark.length - 1] >= p.spark[0]
+                      : true;
+                return (
+                  <tr key={p.ticker} className="border-t border-slate-100 dark:border-slate-800">
+                    <td className="px-3 py-2">
+                      <span className="font-semibold text-slate-900 dark:text-slate-100">{p.ticker}</span>
+                      {p.name && (
+                        <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">{p.name}</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                      {p.quantity}
+                    </td>
+                    <td className="px-3 py-2">
+                      <div className="flex items-center justify-end gap-2">
+                        {p.spark && p.spark.length > 1 && (
+                          <Sparkline data={p.spark} positive={positive} />
+                        )}
+                        {chg != null && (
+                          <span
+                            className={`text-xs font-medium tabular-nums ${
+                              positive
+                                ? "text-emerald-600 dark:text-emerald-400"
+                                : "text-red-600 dark:text-red-400"
+                            }`}
+                          >
+                            {positive ? "+" : ""}
+                            {chg.toFixed(2)}%
+                          </span>
+                        )}
+                        {chg == null && (!p.spark || p.spark.length < 2) && (
+                          <span className="text-xs text-slate-300 dark:text-slate-600">—</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">
+                      {p.market_value == null ? "—" : formatPrice(p.market_value, p.currency)}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
