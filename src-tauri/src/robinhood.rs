@@ -244,7 +244,7 @@ fn describe_tool(t: &ToolInfo) -> String {
 /// Describe the *shape* of a tool response — its keys only, never its values —
 /// so a parsing miss can be diagnosed without leaking holdings or balances.
 fn shape_of(v: &Value) -> String {
-    shape_of_depth(v, 3)
+    shape_of_depth(v, 4)
 }
 
 /// Structural description of a JSON value to `depth` levels: object keys, array
@@ -610,8 +610,15 @@ fn symbols_value(t: &ToolInfo, symbols: &[String]) -> Value {
     }
 }
 
-/// Extract a `Quote` (price + today's change) from one quote object.
+/// The object that actually holds quote fields. Some servers wrap it under a
+/// `quote` key — `{ "quote": {…} }` — so unwrap that one level when present.
+fn quote_source(rec: &Value) -> &Value {
+    rec.get("quote").filter(|q| q.is_object()).unwrap_or(rec)
+}
+
+/// Extract a `Quote` (price + today's change) from one quote record.
 fn quote_fields(rec: &Value) -> Quote {
+    let rec = quote_source(rec);
     let price = num(
         rec,
         &[
@@ -640,7 +647,8 @@ fn parse_quotes(v: &Value) -> HashMap<String, Quote> {
     let v = unwrap_envelope(v);
     let mut out = HashMap::new();
     for rec in find_records(&v) {
-        if let Some(sym) = text(&rec, &["symbol", "ticker", "instrument_symbol"])
+        if let Some(sym) = text(quote_source(&rec), &["symbol", "ticker", "instrument_symbol"])
+            .or_else(|| text(&rec, &["symbol", "ticker", "instrument_symbol"]))
             .map(|s| s.to_ascii_uppercase())
             .filter(|s| looks_like_ticker(s))
         {
@@ -692,7 +700,7 @@ fn parse_quotes_positional(v: &Value, symbols: &[String]) -> HashMap<String, Quo
 /// or an object wrapping the points under a common key), trimmed to its tail.
 fn extract_series(v: &Value) -> Vec<f64> {
     const SERIES_KEYS: &[&str] =
-        &["historicals", "data_points", "points", "history", "series", "candles", "results"];
+        &["bars", "historicals", "data_points", "points", "history", "series", "candles", "results"];
     let arr = if let Some(a) = v.as_array() {
         a.clone()
     } else {
@@ -1551,6 +1559,54 @@ mod tests {
         // Two requested but one record back → don't risk a mislabel.
         let symbols = vec!["AAPL".to_string(), "MSFT".to_string()];
         assert!(parse_quotes_positional(&v, &symbols).is_empty());
+    }
+
+    #[test]
+    fn parse_quotes_reads_records_nested_under_quote_key() {
+        // The live shape: data.results is a list of { quote: { … } } wrappers,
+        // each carrying its own symbol inside the nested quote object.
+        let v = json!({
+            "data": {
+                "closes_error": "n/a",
+                "results": [
+                    { "quote": { "symbol": "AAPL", "last_trade_price": "200.0", "previous_close": "190.0" } },
+                    { "quote": { "symbol": "BRK.B", "last_trade_price": 500.0 } },
+                ],
+            },
+            "guide": "text",
+        });
+        // Keyed parsing now finds the symbol inside the nested quote…
+        let q = parse_quotes(&v);
+        assert_eq!(q.get("AAPL").unwrap().price, Some(200.0));
+        assert_eq!(q.get("BRK.B").unwrap().price, Some(500.0));
+
+        // …and positional zipping also reaches the nested price if symbols are absent.
+        let bare = json!({ "data": { "results": [{ "quote": { "last_trade_price": "12.5" } }] } });
+        let pos = parse_quotes_positional(&bare, &["XYZ".to_string()]);
+        assert_eq!(pos.get("XYZ").unwrap().price, Some(12.5));
+    }
+
+    #[test]
+    fn parse_historicals_reads_bars_series_with_symbol() {
+        // The live chunked shape: data.results is per-symbol records whose price
+        // series lives under "bars".
+        let v = json!({
+            "data": {
+                "results": [{
+                    "symbol": "AAPL",
+                    "bounds": "regular",
+                    "interval": "5minute",
+                    "bars": [
+                        { "close_price": "10.0" },
+                        { "close_price": "11.0" },
+                        { "close_price": "12.5" },
+                    ],
+                }],
+            },
+            "guide": "text",
+        });
+        let h = parse_historicals(&v);
+        assert_eq!(h.get("AAPL").unwrap(), &vec![10.0, 11.0, 12.5]);
     }
 
 
