@@ -50,4 +50,13 @@ export const robinhoodConnect = () => invoke<RobinhoodStatus>("robinhood_connect
 
 export const robinhoodDisconnect = () => invoke<void>("robinhood_disconnect");
 
+// --- Biometric unlock (Touch ID / Windows Hello) ---------------------------
+
+// Whether this device exposes a biometric / device-auth unlock prompt.
+export const biometricAvailable = () => invoke<boolean>("biometric_available");
+
+// Prompts for Touch ID / Windows Hello; resolves true when the saved Robinhood
+// session is unlocked, false when the user dismisses or fails the prompt.
+export const biometricUnlock = () => invoke<boolean>("biometric_unlock");
+
 export const robinhoodPortfolio = () => invoke<Portfolio>("robinhood_portfolio");

@@ -33,6 +33,12 @@ pub enum AppError {
     #[error("Robinhood integration error: {0}")]
     Robinhood(String),
 
+    #[error("Locked. Unlock with Touch ID or Windows Hello to view your Robinhood portfolio.")]
+    Locked,
+
+    #[error("{0}")]
+    Biometric(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -48,6 +54,8 @@ impl AppError {
             AppError::Database(_) => "database",
             AppError::RobinhoodNotConnected => "robinhood_not_connected",
             AppError::Robinhood(_) => "robinhood",
+            AppError::Locked => "locked",
+            AppError::Biometric(_) => "biometric",
             AppError::Other(_) => "other",
         }
     }

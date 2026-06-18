@@ -1,6 +1,6 @@
 [package]
 name = "trendwave"
-version = "1.0.0"
+version = "1.1.0"
 description = "A background-first desktop app for detecting early stock momentum."
 authors = ["Daryn Brown"]
 edition = "2021"
@@ -34,6 +34,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # Robinhood Agentic (MCP) read-only integration: OS keychain for OAuth tokens,
 # plus the primitives for an OAuth 2.1 PKCE authorization-code flow.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+# Native biometric unlock (macOS Touch ID / Windows Hello) gating the saved
+# Robinhood session. App-enforced gate, not a keychain ACL.
+robius-authentication = "0.1.1"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"

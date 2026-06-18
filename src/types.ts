@@ -84,6 +84,7 @@ export interface Portfolio {
 
 export interface RobinhoodStatus {
   connected: boolean;
+  locked: boolean;
   portfolio?: Portfolio | null;
 }
 
@@ -108,6 +109,7 @@ export interface Settings {
   max_results: number;
   use_news: boolean;
   use_fundamentals: boolean;
+  require_biometric_unlock: boolean;
 }
 
 export interface Watchlist {

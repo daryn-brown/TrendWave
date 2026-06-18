@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import * as api from "./api";
 import {
@@ -11,6 +11,7 @@ import {
   IconSpinner,
   ProgressLog,
   PortfolioEmpty,
+  PortfolioLocked,
   PortfolioPanel,
   SettingsModal,
   UpdateBanner,
@@ -53,6 +54,9 @@ export default function App() {
 
   const [robinhood, setRobinhood] = useState<RobinhoodStatus | null>(null);
   const [rhBusy, setRhBusy] = useState(false);
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
+  const autoUnlockTried = useRef(false);
 
   const [update, setUpdate] = useState<Update | null>(null);
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase | null>(null);
@@ -64,6 +68,7 @@ export default function App() {
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
     refreshWatchlists();
+    api.biometricAvailable().then(setBioAvailable).catch(() => {});
     // Reflect any previously-authorized Robinhood session (read-only). If we're
     // connected but the in-memory snapshot was cleared (e.g. app restart), pull
     // it once so the panel populates without manual action. Stay quiet on
@@ -72,10 +77,17 @@ export default function App() {
       .robinhoodStatus()
       .then((s) => {
         setRobinhood(s);
-        if (s.connected && !s.portfolio) {
+        if (s.connected && s.locked) {
+          // The saved session is gated behind biometrics — prompt once on
+          // launch. A ref guards against React StrictMode's double effect run.
+          if (!autoUnlockTried.current) {
+            autoUnlockTried.current = true;
+            runUnlock(true);
+          }
+        } else if (s.connected && !s.portfolio) {
           api
             .robinhoodPortfolio()
-            .then((portfolio) => setRobinhood({ connected: true, portfolio }))
+            .then((portfolio) => setRobinhood({ connected: true, locked: false, portfolio }))
             .catch(() => {});
         }
       })
@@ -224,7 +236,7 @@ export default function App() {
     setRhBusy(true);
     try {
       await api.robinhoodDisconnect();
-      setRobinhood({ connected: false, portfolio: null });
+      setRobinhood({ connected: false, locked: false, portfolio: null });
     } catch (err) {
       setError(err as AppErrorShape);
     } finally {
@@ -237,13 +249,35 @@ export default function App() {
     setError(null);
     try {
       const portfolio = await api.robinhoodPortfolio();
-      setRobinhood({ connected: true, portfolio });
+      setRobinhood({ connected: true, locked: false, portfolio });
     } catch (err) {
       setError(err as AppErrorShape);
     } finally {
       setRhBusy(false);
     }
   };
+
+  // Reveal the saved session once unlocked. `silent` keeps the launch auto-prompt
+  // from flashing an error banner when biometrics simply aren't set up yet.
+  const revealPortfolio = async () => {
+    const portfolio = await api.robinhoodPortfolio().catch(() => null);
+    setRobinhood({ connected: true, locked: false, portfolio });
+  };
+
+  const runUnlock = async (silent: boolean) => {
+    setUnlocking(true);
+    if (!silent) setError(null);
+    try {
+      const unlocked = await api.biometricUnlock();
+      if (unlocked) await revealPortfolio();
+    } catch (err) {
+      if (!silent) setError(err as AppErrorShape);
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
+  const handleUnlock = () => runUnlock(false);
 
   const handleCheckUpdates = async () => {
     if (updatePhase === "downloading") return;
@@ -341,7 +375,9 @@ export default function App() {
           {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
           {robinhood?.connected &&
-            (robinhood.portfolio ? (
+            (robinhood.locked ? (
+              <PortfolioLocked busy={unlocking} onUnlock={handleUnlock} />
+            ) : robinhood.portfolio ? (
               <PortfolioPanel
                 portfolio={robinhood.portfolio}
                 busy={rhBusy}
@@ -401,6 +437,7 @@ export default function App() {
           robinhoodBusy={rhBusy}
           onConnectRobinhood={handleConnectRobinhood}
           onDisconnectRobinhood={handleDisconnectRobinhood}
+          biometricAvailable={bioAvailable}
         />
       )}
 
