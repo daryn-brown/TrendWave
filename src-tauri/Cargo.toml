@@ -1,6 +1,6 @@
 [package]
 name = "trendwave"
-version = "0.1.0"
+version = "1.0.0"
 description = "A background-first desktop app for detecting early stock momentum."
 authors = ["Daryn Brown"]
 edition = "2021"
