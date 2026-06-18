@@ -3,9 +3,12 @@ mod db;
 mod error;
 mod feeds;
 mod fundamentals;
+mod mcp;
 mod model;
+mod oauth;
 mod ollama;
 mod research;
+mod robinhood;
 mod settings;
 
 use std::sync::Mutex;
@@ -41,6 +44,7 @@ pub fn run() {
             app.manage(AppState {
                 db: Mutex::new(conn),
                 http,
+                robinhood: Mutex::new(None),
             });
 
             Ok(())
@@ -53,6 +57,10 @@ pub fn run() {
             commands::list_watchlists,
             commands::create_watchlist,
             commands::delete_watchlist,
+            commands::robinhood_status,
+            commands::robinhood_connect,
+            commands::robinhood_disconnect,
+            commands::robinhood_portfolio,
         ])
         .run(tauri::generate_context!());
 

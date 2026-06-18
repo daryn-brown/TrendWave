@@ -27,6 +27,12 @@ pub enum AppError {
     #[error("Database error: {0}")]
     Database(String),
 
+    #[error("Robinhood is not connected. Connect it in Settings to enable portfolio context.")]
+    RobinhoodNotConnected,
+
+    #[error("Robinhood integration error: {0}")]
+    Robinhood(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -40,6 +46,8 @@ impl AppError {
             AppError::Network(_) => "network",
             AppError::EmptyFeed(_) => "empty_feed",
             AppError::Database(_) => "database",
+            AppError::RobinhoodNotConnected => "robinhood_not_connected",
+            AppError::Robinhood(_) => "robinhood",
             AppError::Other(_) => "other",
         }
     }

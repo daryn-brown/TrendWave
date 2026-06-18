@@ -5,6 +5,8 @@ import type {
   Bottleneck,
   Candidate,
   GrowthData,
+  Portfolio,
+  RobinhoodStatus,
   Settings,
   Watchlist,
 } from "./types";
@@ -342,6 +344,11 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
       )}
 
       <div className="mt-3 flex flex-wrap items-center gap-2">
+        {candidate.owned && (
+          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-semibold text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/25">
+            In your portfolio
+          </span>
+        )}
         <span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs font-medium text-sky-700 ring-1 ring-sky-100 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-500/20">
           {candidate.bottleneck}
         </span>
@@ -589,10 +596,18 @@ export function SettingsModal({
   settings,
   onSave,
   onClose,
+  robinhood,
+  robinhoodBusy,
+  onConnectRobinhood,
+  onDisconnectRobinhood,
 }: {
   settings: Settings;
   onSave: (s: Settings) => void;
   onClose: () => void;
+  robinhood: RobinhoodStatus | null;
+  robinhoodBusy: boolean;
+  onConnectRobinhood: () => void;
+  onDisconnectRobinhood: () => void;
 }) {
   const [form, setForm] = useState<Settings>(settings);
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
@@ -620,6 +635,12 @@ export function SettingsModal({
             <input type="checkbox" checked={form.use_fundamentals} onChange={(e) => update("use_fundamentals", e.target.checked)} className="h-4 w-4 rounded border-slate-300 dark:border-slate-600 dark:bg-slate-800" />
             Research real growth (SEC EDGAR + Yahoo) to rank picks
           </label>
+          <RobinhoodSection
+            status={robinhood}
+            busy={robinhoodBusy}
+            onConnect={onConnectRobinhood}
+            onDisconnect={onDisconnectRobinhood}
+          />
         </div>
 
         <div className="mt-6 flex justify-end gap-2">
@@ -632,6 +653,153 @@ export function SettingsModal({
         </div>
       </div>
     </div>
+  );
+}
+
+// ---- Robinhood (read-only) --------------------------------------------------
+
+function RobinhoodSection({
+  status,
+  busy,
+  onConnect,
+  onDisconnect,
+}: {
+  status: RobinhoodStatus | null;
+  busy: boolean;
+  onConnect: () => void;
+  onDisconnect: () => void;
+}) {
+  const connected = status?.connected ?? false;
+  return (
+    <div className="rounded-2xl border border-slate-200 p-3 dark:border-slate-800">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Robinhood</p>
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {connected
+              ? "Connected · read-only"
+              : "Use your holdings as research context"}
+          </p>
+        </div>
+        {connected ? (
+          <button
+            onClick={onDisconnect}
+            disabled={busy}
+            className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+          >
+            Disconnect
+          </button>
+        ) : (
+          <button
+            onClick={onConnect}
+            disabled={busy}
+            className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
+          >
+            {busy ? "Connecting…" : "Connect"}
+          </button>
+        )}
+      </div>
+      <p className="mt-2 text-[11px] leading-4 text-slate-400 dark:text-slate-500">
+        Read-only. TrendWave reads your positions to flag picks you already own — it can’t place,
+        modify, or cancel trades. A browser window opens for you to sign in to Robinhood.
+      </p>
+    </div>
+  );
+}
+
+export function PortfolioPanel({
+  portfolio,
+  busy,
+  onRefresh,
+}: {
+  portfolio: Portfolio;
+  busy: boolean;
+  onRefresh: () => void;
+}) {
+  const acct = portfolio.account;
+  const held = portfolio.positions
+    .filter((p) => p.quantity > 0)
+    .sort((a, b) => (b.market_value ?? 0) - (a.market_value ?? 0));
+
+  const stat = (label: string, value: number | null | undefined, currency: string) =>
+    value == null ? null : (
+      <div>
+        <div className="text-[10px] font-medium uppercase tracking-wider text-slate-400 dark:text-slate-500">
+          {label}
+        </div>
+        <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+          {formatPrice(value, currency)}
+        </div>
+      </div>
+    );
+
+  return (
+    <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_18px_50px_-40px_rgba(0,0,0,0.8)]">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+            Your portfolio
+          </h2>
+          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/25">
+            Read-only
+          </span>
+        </div>
+        <button
+          onClick={onRefresh}
+          disabled={busy}
+          className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
+          {busy ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+
+      {acct && (
+        <div className="mt-3 flex flex-wrap gap-6">
+          {stat("Portfolio value", acct.portfolio_value, acct.currency)}
+          {stat("Buying power", acct.buying_power, acct.currency)}
+          {stat("Cash", acct.cash, acct.currency)}
+        </div>
+      )}
+
+      {held.length > 0 ? (
+        <div className="mt-4 overflow-hidden rounded-2xl ring-1 ring-slate-100 dark:ring-slate-800">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-400 dark:bg-slate-800/60 dark:text-slate-500">
+                <th className="px-3 py-2 font-medium">Ticker</th>
+                <th className="px-3 py-2 text-right font-medium">Qty</th>
+                <th className="px-3 py-2 text-right font-medium">Value</th>
+              </tr>
+            </thead>
+            <tbody>
+              {held.map((p) => (
+                <tr key={p.ticker} className="border-t border-slate-100 dark:border-slate-800">
+                  <td className="px-3 py-2">
+                    <span className="font-semibold text-slate-900 dark:text-slate-100">{p.ticker}</span>
+                    {p.name && (
+                      <span className="ml-2 text-xs text-slate-400 dark:text-slate-500">{p.name}</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-600 dark:text-slate-300">
+                    {p.quantity}
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-900 dark:text-slate-100">
+                    {p.market_value == null ? "—" : formatPrice(p.market_value, p.currency)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">No equity positions found.</p>
+      )}
+
+      <p className="mt-2 text-[10px] text-slate-400 dark:text-slate-500">
+        As of {new Date(portfolio.as_of).toLocaleString()}
+        {portfolio.tools_used.length > 0 && ` · via ${portfolio.tools_used.join(", ")}`}
+      </p>
+    </section>
   );
 }
 
