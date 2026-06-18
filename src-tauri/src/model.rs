@@ -107,6 +107,10 @@ pub struct Candidate {
     pub news: Vec<NewsItem>,
     /// Composite 0-100 score used for ranking (positioning + upside weighted).
     pub score: f64,
+    /// `true` when this ticker is held in the user's connected Robinhood account.
+    /// Read-only context for the UI ("In your portfolio") — never affects ranking.
+    #[serde(default)]
+    pub owned: bool,
 }
 
 /// The full payload returned to the frontend for one research run.
