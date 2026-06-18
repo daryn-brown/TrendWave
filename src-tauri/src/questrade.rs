@@ -138,10 +138,6 @@ pub fn clear_auth() -> AppResult<()> {
     Ok(())
 }
 
-pub fn is_connected() -> bool {
-    load_auth().is_some()
-}
-
 /// Exchange a refresh token for a fresh session (access token + api_server + a
 /// rotated refresh token). Used both for the initial manual-token connect and
 /// for transparent refresh.

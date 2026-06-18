@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import "./App.css";
 import * as api from "./api";
 import {
@@ -59,7 +59,6 @@ export default function App() {
   const [rhBusy, setRhBusy] = useState(false);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [unlocking, setUnlocking] = useState(false);
-  const autoUnlockTried = useRef(false);
 
   const [questrade, setQuestrade] = useState<QuestradeStatus | null>(null);
   const [qtBusy, setQtBusy] = useState(false);
@@ -75,42 +74,13 @@ export default function App() {
     api.getSettings().then(setSettings).catch(() => {});
     refreshWatchlists();
     api.biometricAvailable().then(setBioAvailable).catch(() => {});
-    // Reflect any previously-authorized Robinhood session (read-only). If we're
-    // connected but the in-memory snapshot was cleared (e.g. app restart), pull
-    // it once so the panel populates without manual action. Stay quiet on
-    // failure — the panel's Load button surfaces the real error on demand.
-    api
-      .robinhoodStatus()
-      .then((s) => {
-        setRobinhood(s);
-        if (s.connected && s.locked) {
-          // The saved session is gated behind biometrics — prompt once on
-          // launch. A ref guards against React StrictMode's double effect run.
-          if (!autoUnlockTried.current) {
-            autoUnlockTried.current = true;
-            runUnlock(true);
-          }
-        } else if (s.connected && !s.portfolio) {
-          api
-            .robinhoodPortfolio()
-            .then((portfolio) => setRobinhood({ connected: true, locked: false, portfolio }))
-            .catch(() => {});
-        }
-      })
-      .catch(() => {});
-    // Same treatment for a previously-authorized Questrade session (read-only).
-    api
-      .questradeStatus()
-      .then((s) => {
-        setQuestrade(s);
-        if (s.connected && !s.portfolio) {
-          api
-            .questradePortfolio()
-            .then((portfolio) => setQuestrade({ connected: true, portfolio }))
-            .catch(() => {});
-        }
-      })
-      .catch(() => {});
+    // Reflect any previously-authorized broker sessions WITHOUT reading the OS
+    // keychain on launch — those reads pop a system password prompt on every
+    // open. The status commands answer from non-secret connection markers; the
+    // token itself is read only when the user unlocks/loads a portfolio on
+    // demand (behind the Touch ID gate), so opening the app stays silent.
+    api.robinhoodStatus().then(setRobinhood).catch(() => {});
+    api.questradeStatus().then(setQuestrade).catch(() => {});
     // Silent check on launch; failures (e.g. running in dev) are ignored.
     checkForUpdate()
       .then((u) => {
@@ -276,8 +246,10 @@ export default function App() {
     }
   };
 
-  // Reveal the saved session once unlocked. `silent` keeps the launch auto-prompt
-  // from flashing an error banner when biometrics simply aren't set up yet.
+  // Reveal the saved session once unlocked. Reading the token here is the first
+  // keychain access of the session, deferred until the user explicitly unlocks,
+  // so the OS credential prompt never fires on launch. `silent` keeps a failed
+  // attempt from flashing an error banner when biometrics aren't set up.
   const revealPortfolio = async () => {
     const portfolio = await api.robinhoodPortfolio().catch(() => null);
     setRobinhood({ connected: true, locked: false, portfolio });
