@@ -1,4 +1,5 @@
 use feed_rs::parser;
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::Deserialize;
 
 use crate::error::{AppError, AppResult};
@@ -7,6 +8,35 @@ use crate::model::{Listing, ListingInfo, NewsItem, PriceData};
 const CHART_URL: &str = "https://query1.finance.yahoo.com/v8/finance/chart/";
 const SEARCH_URL: &str = "https://query1.finance.yahoo.com/v1/finance/search";
 const NEWS_URL: &str = "https://feeds.finance.yahoo.com/rss/2.0/headline";
+
+// ---- Ticker validation ------------------------------------------------------
+
+/// Encode everything outside the validated ticker allowlist (`[A-Za-z0-9.-]`).
+/// `.` and `-` are URL-path-safe and appear in real tickers (e.g. `BRK.B`,
+/// `RDS-A`), so they pass through; for a validated symbol this set is a no-op,
+/// but it neutralises anything unexpected as defense in depth.
+const TICKER_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC.remove(b'.').remove(b'-');
+
+/// Validate a model-/tool-supplied `symbol` against a strict ticker allowlist
+/// (`^[A-Za-z0-9.-]{1,15}$`) and return it percent-encoded for safe
+/// interpolation into a URL *path*. The Yahoo host stays pinned, but a ticker
+/// can originate from LLM/tool output, and these endpoints take it in the path
+/// where `?`, `#`, `/`, or `..` would otherwise inject extra path/query
+/// segments. Reject anything off the allowlist (surfaced as `EmptyFeed`, the
+/// same shape an unknown ticker already produces) and escape the rest.
+pub(crate) fn validate_ticker(symbol: &str) -> AppResult<String> {
+    let len = symbol.chars().count();
+    let allowed = (1..=15).contains(&len)
+        && symbol
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if !allowed {
+        return Err(AppError::EmptyFeed(format!(
+            "invalid ticker symbol: {symbol:?}"
+        )));
+    }
+    Ok(utf8_percent_encode(symbol, TICKER_ENCODE_SET).to_string())
+}
 
 // ---- Prices -----------------------------------------------------------------
 
@@ -66,7 +96,8 @@ fn to_major_units(price: f64, currency: &str) -> (f64, String) {
 /// Doubles as ticker validation: a symbol with no chart data is treated as
 /// invalid and surfaces as `EmptyFeed`.
 pub async fn fetch_price(http: &reqwest::Client, symbol: &str) -> AppResult<PriceData> {
-    let url = format!("{CHART_URL}{symbol}?range=1mo&interval=1d");
+    let safe_symbol = validate_ticker(symbol)?;
+    let url = format!("{CHART_URL}{safe_symbol}?range=1mo&interval=1d");
     let envelope: ChartEnvelope = http.get(&url).send().await?.json().await?;
 
     let result = envelope
@@ -346,6 +377,29 @@ mod tests {
         let (price, currency) = to_major_units(150.0, "USD");
         assert!((price - 150.0).abs() < 1e-9);
         assert_eq!(currency, "USD");
+    }
+
+    #[test]
+    fn accepts_normal_tickers() {
+        for t in ["AAPL", "BRK.B", "RDS-A", "SHOP.TO", "msft", "9988.HK"] {
+            assert_eq!(validate_ticker(t).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn rejects_injection_and_malformed_tickers() {
+        for t in [
+            "",                       // empty
+            "AAPL?range=1d",          // query injection
+            "AAPL/quoteSummary",      // path injection
+            "AAPL#frag",              // fragment injection
+            "../../etc/passwd",       // traversal
+            "AAA BBB",                // whitespace
+            "TOOOOOOOOOOOOOOOLONG",   // > 15 chars
+            "café",                   // non-ascii
+        ] {
+            assert!(validate_ticker(t).is_err(), "should reject {t:?}");
+        }
     }
 
     fn quote(symbol: &str, name: &str, quote_type: &str) -> SearchQuote {

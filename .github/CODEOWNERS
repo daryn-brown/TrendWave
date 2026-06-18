@@ -1,0 +1,3 @@
+# Require review from the repository owner for every change in the repo.
+# The last matching pattern wins, so this single rule covers everything.
+* @daryn-brown

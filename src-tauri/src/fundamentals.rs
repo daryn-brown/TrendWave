@@ -438,10 +438,11 @@ impl YahooEnrich {
     }
 
     async fn fetch(&self, symbol: &str) -> Option<YahooMetrics> {
+        let safe_symbol = crate::feeds::validate_ticker(symbol).ok()?;
         let value: serde_json::Value = self
             .client
             .get(format!(
-                "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+                "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{safe_symbol}"
             ))
             .query(&[
                 ("modules", "financialData,defaultKeyStatistics,price"),
