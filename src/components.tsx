@@ -87,6 +87,21 @@ export const IconLock = ({ className = base }: IconProps) => (
     <rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
   </svg>
 );
+export const IconChevronLeft = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m15 18-6-6 6-6" />
+  </svg>
+);
+export const IconChevronRight = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="m9 18 6-6-6-6" />
+  </svg>
+);
+export const IconBriefcase = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="2" y="7" width="20" height="14" rx="2" /><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" />
+  </svg>
+);
 
 // ---- Broker brand marks (filled monogram badges, so the two connections are
 // visually distinct at a glance) --------------------------------------------
@@ -998,6 +1013,89 @@ export function BrokerPortfolioTabs({ tabs }: { tabs: BrokerTab[] }) {
         </div>
       </div>
     </section>
+  );
+}
+
+/// Right-side rail that keeps the connected brokers' portfolio tables out of the
+/// main column (so search results stay at the top of the page) while remaining a
+/// click away. Collapses to a slim bar; the choice is remembered across launches.
+const RAIL_STORAGE_KEY = "trendwave-portfolio-rail";
+
+function getRailCollapsed(): boolean {
+  try {
+    return localStorage.getItem(RAIL_STORAGE_KEY) === "collapsed";
+  } catch {
+    return false;
+  }
+}
+
+export function PortfolioRail({ tabs }: { tabs: BrokerTab[] }) {
+  const [collapsed, setCollapsed] = useState(getRailCollapsed);
+
+  const toggle = () =>
+    setCollapsed((c) => {
+      const next = !c;
+      try {
+        localStorage.setItem(RAIL_STORAGE_KEY, next ? "collapsed" : "open");
+      } catch {
+        /* persistence is best-effort */
+      }
+      return next;
+    });
+
+  if (tabs.length === 0) return null;
+
+  if (collapsed) {
+    return (
+      <aside className="flex w-12 shrink-0 flex-col items-center gap-3 border-l border-slate-200 bg-white/60 py-3 dark:border-slate-800 dark:bg-slate-900/60">
+        <button
+          onClick={toggle}
+          aria-expanded={false}
+          title="Show portfolio"
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+        >
+          <IconChevronLeft className="h-4 w-4" />
+        </button>
+        <div className="h-px w-6 bg-slate-200 dark:bg-slate-800" />
+        <div className="flex flex-col items-center gap-2">
+          {tabs.map((t) => (
+            <button
+              key={t.broker}
+              onClick={toggle}
+              title={`Show ${brokerLabel(t.broker)} portfolio`}
+              className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800"
+            >
+              <BrokerIcon broker={t.broker} className="h-5 w-5" />
+            </button>
+          ))}
+        </div>
+        <span className="mt-1 text-[10px] font-semibold uppercase tracking-wider text-slate-400 [writing-mode:vertical-rl] dark:text-slate-500">
+          Portfolio
+        </span>
+      </aside>
+    );
+  }
+
+  return (
+    <aside className="flex w-96 shrink-0 flex-col border-l border-slate-200 bg-white/60 dark:border-slate-800 dark:bg-slate-900/60">
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+        <div className="flex items-center gap-2">
+          <IconBriefcase className="h-5 w-5 text-sky-600 dark:text-sky-400" />
+          <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">Portfolio</span>
+        </div>
+        <button
+          onClick={toggle}
+          aria-expanded={true}
+          title="Collapse portfolio"
+          className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+        >
+          <IconChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4">
+        <BrokerPortfolioTabs tabs={tabs} />
+      </div>
+    </aside>
   );
 }
 
