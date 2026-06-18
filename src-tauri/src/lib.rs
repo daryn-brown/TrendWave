@@ -45,6 +45,29 @@ pub fn run() {
                 db::set_flag(&conn, db::FLAG_BIO_DEFAULT_MIGRATED, true)?;
             }
 
+            // One-time marker backfill: broker status now reads SQLite connection
+            // markers (set only on connect/disconnect) instead of the keychain.
+            // Installs that were already connected before that change have a stored
+            // token but no marker, which left the portfolio sidebar empty. Reconcile
+            // once from whether a credential exists. `load_auth()` returns `None`
+            // without prompting when there's no keychain entry, so never-connected
+            // and fresh installs stay prompt-free; only a genuinely connected user
+            // sees a single one-time keychain prompt here, after which status is
+            // marker-only again.
+            if !db::get_flag(&conn, db::FLAG_MARKERS_BACKFILLED)? {
+                db::set_flag(
+                    &conn,
+                    db::FLAG_ROBINHOOD_CONNECTED,
+                    oauth::load_auth().is_some(),
+                )?;
+                db::set_flag(
+                    &conn,
+                    db::FLAG_QUESTRADE_CONNECTED,
+                    questrade::load_auth().is_some(),
+                )?;
+                db::set_flag(&conn, db::FLAG_MARKERS_BACKFILLED, true)?;
+            }
+
             // One shared HTTP client. A short connect timeout makes a dead Ollama
             // (or offline machine) fail fast, while a long overall timeout leaves
             // room for slow local-model generation.
