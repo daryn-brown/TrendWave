@@ -39,6 +39,12 @@ pub enum AppError {
     #[error("{0}")]
     Biometric(String),
 
+    #[error("Questrade is not connected. Connect it in Settings to enable portfolio context.")]
+    QuestradeNotConnected,
+
+    #[error("Questrade integration error: {0}")]
+    Questrade(String),
+
     #[error("{0}")]
     Other(String),
 }
@@ -56,6 +62,8 @@ impl AppError {
             AppError::Robinhood(_) => "robinhood",
             AppError::Locked => "locked",
             AppError::Biometric(_) => "biometric",
+            AppError::QuestradeNotConnected => "questrade_not_connected",
+            AppError::Questrade(_) => "questrade",
             AppError::Other(_) => "other",
         }
     }

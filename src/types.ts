@@ -51,7 +51,7 @@ export interface Candidate {
   sentiment?: number | null;
   news: NewsItem[];
   score: number;
-  owned?: boolean; // held in the connected Robinhood account (read-only context)
+  owned?: boolean; // held in a connected brokerage account (read-only context)
 }
 
 export interface Position {
@@ -85,6 +85,11 @@ export interface Portfolio {
 export interface RobinhoodStatus {
   connected: boolean;
   locked: boolean;
+  portfolio?: Portfolio | null;
+}
+
+export interface QuestradeStatus {
+  connected: boolean;
   portfolio?: Portfolio | null;
 }
 
