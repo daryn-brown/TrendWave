@@ -9,6 +9,7 @@ export interface Bottleneck {
 export interface PriceData {
   price: number;
   currency: string;
+  name?: string | null;
   change_pct: number;
   last_volume: number;
   avg_volume: number;
@@ -37,6 +38,8 @@ export interface NewsItem {
 export interface Candidate {
   ticker: string;
   company: string;
+  verified_name?: string | null;
+  identity_mismatch?: boolean;
   price?: PriceData | null;
   bottleneck: string;
   thesis: string;
