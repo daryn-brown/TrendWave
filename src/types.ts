@@ -51,6 +51,36 @@ export interface Candidate {
   sentiment?: number | null;
   news: NewsItem[];
   score: number;
+  owned?: boolean; // held in the connected Robinhood account (read-only context)
+}
+
+export interface Position {
+  ticker: string;
+  name?: string | null;
+  quantity: number;
+  market_value?: number | null;
+  average_buy_price?: number | null;
+  unrealized_plpc?: number | null;
+  currency: string;
+}
+
+export interface AccountSummary {
+  portfolio_value?: number | null;
+  buying_power?: number | null;
+  cash?: number | null;
+  currency: string;
+}
+
+export interface Portfolio {
+  positions: Position[];
+  account?: AccountSummary | null;
+  as_of: string;
+  tools_used: string[];
+}
+
+export interface RobinhoodStatus {
+  connected: boolean;
+  portfolio?: Portfolio | null;
 }
 
 export interface ResearchResult {

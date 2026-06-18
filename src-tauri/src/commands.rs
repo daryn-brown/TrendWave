@@ -1,23 +1,30 @@
+use std::collections::BTreeSet;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::Connection;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::db::{self, Watchlist};
 use crate::error::{AppError, AppResult};
 use crate::model::{ProgressEvent, ResearchResult};
+use crate::oauth;
 use crate::ollama::OllamaClient;
 use crate::research;
+use crate::robinhood::{Portfolio, RobinhoodClient};
 use crate::settings::Settings;
 
 /// Shared application state managed by Tauri. The SQLite connection lives behind
 /// a `Mutex` (rusqlite's `Connection` is not `Sync`); we only ever hold the lock
 /// for short, synchronous queries and never across an `.await`. The HTTP client
-/// is internally ref-counted and cheap to clone for each async task.
+/// is internally ref-counted and cheap to clone for each async task. `robinhood`
+/// caches the last read-only portfolio snapshot so research can badge owned
+/// tickers without a network round-trip.
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub http: reqwest::Client,
+    pub robinhood: Mutex<Option<Portfolio>>,
 }
 
 impl AppState {
@@ -87,6 +94,75 @@ pub async fn delete_watchlist(state: State<'_, AppState>, id: i64) -> AppResult<
     db::delete_watchlist(&conn, id)
 }
 
+/// Read-only Robinhood connection status plus the last cached portfolio snapshot.
+#[derive(serde::Serialize)]
+pub struct RobinhoodStatus {
+    pub connected: bool,
+    pub portfolio: Option<Portfolio>,
+}
+
+#[tauri::command]
+pub async fn robinhood_status(state: State<'_, AppState>) -> AppResult<RobinhoodStatus> {
+    let portfolio = state
+        .robinhood
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone());
+    Ok(RobinhoodStatus {
+        connected: oauth::is_connected(),
+        portfolio,
+    })
+}
+
+/// Kick off the OAuth flow (opens the system browser), then pull an initial
+/// read-only snapshot. Connecting succeeds even if the first snapshot fails.
+#[tauri::command]
+pub async fn robinhood_connect(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<RobinhoodStatus> {
+    let opener = app.clone();
+    oauth::connect(&state.http, move |url| {
+        opener
+            .opener()
+            .open_url(url, None::<&str>)
+            .map_err(|e| AppError::Robinhood(format!("could not open browser: {e}")))
+    })
+    .await?;
+
+    let portfolio = fetch_and_cache(&state).await.ok();
+    Ok(RobinhoodStatus {
+        connected: true,
+        portfolio,
+    })
+}
+
+#[tauri::command]
+pub async fn robinhood_disconnect(state: State<'_, AppState>) -> AppResult<()> {
+    oauth::clear_auth()?;
+    if let Ok(mut guard) = state.robinhood.lock() {
+        *guard = None;
+    }
+    Ok(())
+}
+
+/// Force a fresh read-only portfolio fetch (refreshing the token if needed).
+#[tauri::command]
+pub async fn robinhood_portfolio(state: State<'_, AppState>) -> AppResult<Portfolio> {
+    fetch_and_cache(&state).await
+}
+
+/// Pull a read-only portfolio via the MCP client and cache it for enrichment.
+async fn fetch_and_cache(state: &AppState) -> AppResult<Portfolio> {
+    let token = oauth::ensure_access_token(&state.http).await?;
+    let client = RobinhoodClient::new(state.http.clone(), token);
+    let portfolio = client.fetch_portfolio().await?;
+    if let Ok(mut guard) = state.robinhood.lock() {
+        *guard = Some(portfolio.clone());
+    }
+    Ok(portfolio)
+}
+
 /// Shared body for both the ad-hoc prompt and watchlist re-runs: load settings,
 /// confirm Ollama is ready (so failures are one clear message), then stream the
 /// pipeline's progress to the frontend channel.
@@ -122,7 +198,17 @@ async fn execute(
         let _ = on_event.send(event);
     };
 
-    match research::run_research(&ollama, &state.http, &settings, prompt, &emit).await {
+    // Read-only Robinhood enrichment: badge picks the user already holds. Pulled
+    // from the last cached snapshot so a research run never blocks on the broker.
+    let owned: BTreeSet<String> = state
+        .robinhood
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .map(|p| p.owned_tickers())
+        .unwrap_or_default();
+
+    match research::run_research(&ollama, &state.http, &settings, prompt, &owned, &emit).await {
         Ok(result) => Ok(result),
         Err(err) => {
             let _ = on_event.send(ProgressEvent::Failed {

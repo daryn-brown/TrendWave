@@ -10,6 +10,7 @@ import {
   IconSparkles,
   IconSpinner,
   ProgressLog,
+  PortfolioPanel,
   SettingsModal,
   UpdateBanner,
   WatchlistSidebar,
@@ -21,6 +22,7 @@ import type {
   Candidate,
   ProgressEvent,
   ResearchResult,
+  RobinhoodStatus,
   Settings,
   Watchlist,
 } from "./types";
@@ -48,6 +50,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [saveName, setSaveName] = useState<string | null>(null);
 
+  const [robinhood, setRobinhood] = useState<RobinhoodStatus | null>(null);
+  const [rhBusy, setRhBusy] = useState(false);
+
   const [update, setUpdate] = useState<Update | null>(null);
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase | null>(null);
   const [updateProgress, setUpdateProgress] = useState(0);
@@ -58,6 +63,8 @@ export default function App() {
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
     refreshWatchlists();
+    // Reflect any previously-authorized Robinhood session (read-only).
+    api.robinhoodStatus().then(setRobinhood).catch(() => {});
     // Silent check on launch; failures (e.g. running in dev) are ignored.
     checkForUpdate()
       .then((u) => {
@@ -186,6 +193,43 @@ export default function App() {
     setShowSettings(false);
   };
 
+  const handleConnectRobinhood = async () => {
+    setRhBusy(true);
+    setError(null);
+    try {
+      setRobinhood(await api.robinhoodConnect());
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setRhBusy(false);
+    }
+  };
+
+  const handleDisconnectRobinhood = async () => {
+    setRhBusy(true);
+    try {
+      await api.robinhoodDisconnect();
+      setRobinhood({ connected: false, portfolio: null });
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setRhBusy(false);
+    }
+  };
+
+  const handleRefreshPortfolio = async () => {
+    setRhBusy(true);
+    setError(null);
+    try {
+      const portfolio = await api.robinhoodPortfolio();
+      setRobinhood({ connected: true, portfolio });
+    } catch (err) {
+      setError(err as AppErrorShape);
+    } finally {
+      setRhBusy(false);
+    }
+  };
+
   const handleCheckUpdates = async () => {
     if (updatePhase === "downloading") return;
     setUpdateToast("Checking for updates…");
@@ -281,6 +325,14 @@ export default function App() {
 
           {error && <ErrorBanner error={error} onDismiss={() => setError(null)} />}
 
+          {robinhood?.connected && robinhood.portfolio && (
+            <PortfolioPanel
+              portfolio={robinhood.portfolio}
+              busy={rhBusy}
+              onRefresh={handleRefreshPortfolio}
+            />
+          )}
+
           {running && <ProgressLog messages={messages} running={running} />}
 
           {(hasResults || result) && (
@@ -323,7 +375,15 @@ export default function App() {
       </main>
 
       {showSettings && settings && (
-        <SettingsModal settings={settings} onSave={handleSaveSettings} onClose={() => setShowSettings(false)} />
+        <SettingsModal
+          settings={settings}
+          onSave={handleSaveSettings}
+          onClose={() => setShowSettings(false)}
+          robinhood={robinhood}
+          robinhoodBusy={rhBusy}
+          onConnectRobinhood={handleConnectRobinhood}
+          onDisconnectRobinhood={handleDisconnectRobinhood}
+        />
       )}
 
       {saveName !== null && (
