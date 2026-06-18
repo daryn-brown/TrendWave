@@ -54,6 +54,11 @@ pub struct GrowthData {
     pub analyst_upside: Option<f64>,
     /// Number of fiscal years the EDGAR series spans (context for CAGR).
     pub years: Option<u32>,
+    /// Whether the YoY growth figures are audited *annual* results (from EDGAR).
+    /// `false` means they are Yahoo's most-recent-quarter figures, which carry a
+    /// different, noisier meaning and should be labeled as such.
+    #[serde(default)]
+    pub annual_growth: bool,
     /// Human-readable provenance, e.g. "SEC EDGAR" or "SEC EDGAR + Yahoo".
     pub source: String,
 }
