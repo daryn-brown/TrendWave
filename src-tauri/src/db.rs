@@ -70,6 +70,7 @@ pub fn save_settings(conn: &Connection, settings: &Settings) -> AppResult<()> {
 pub const FLAG_ROBINHOOD_CONNECTED: &str = "robinhood_connected";
 pub const FLAG_QUESTRADE_CONNECTED: &str = "questrade_connected";
 pub const FLAG_BIO_DEFAULT_MIGRATED: &str = "bio_default_migrated";
+pub const FLAG_MARKERS_BACKFILLED: &str = "markers_backfilled";
 
 /// Read a boolean flag; absent keys read as `false`.
 pub fn get_flag(conn: &Connection, key: &str) -> AppResult<bool> {
