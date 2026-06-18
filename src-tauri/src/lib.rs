@@ -8,6 +8,7 @@ mod mcp;
 mod model;
 mod oauth;
 mod ollama;
+mod questrade;
 mod research;
 mod robinhood;
 mod settings;
@@ -47,6 +48,7 @@ pub fn run() {
                 http,
                 robinhood: Mutex::new(None),
                 unlocked: std::sync::atomic::AtomicBool::new(false),
+                questrade: Mutex::new(None),
             });
 
             Ok(())
@@ -65,6 +67,10 @@ pub fn run() {
             commands::robinhood_portfolio,
             commands::biometric_available,
             commands::biometric_unlock,
+            commands::questrade_status,
+            commands::questrade_connect,
+            commands::questrade_disconnect,
+            commands::questrade_portfolio,
         ])
         .run(tauri::generate_context!());
 

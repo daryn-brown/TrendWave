@@ -15,81 +15,16 @@
 //! output isn't pinned here, so we look for the common key spellings and parse
 //! numbers whether they arrive as numbers or strings.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::mcp::{McpClient, ToolInfo};
+use crate::model::{AccountSummary, Portfolio, Position};
 
 /// Robinhood's Agentic trading MCP endpoint (Streamable HTTP).
 pub const ENDPOINT: &str = "https://agent.robinhood.com/mcp/trading";
-
-/// A single equity position held in the connected account.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Position {
-    pub ticker: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub quantity: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub market_value: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub average_buy_price: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub unrealized_plpc: Option<f64>,
-    pub currency: String,
-    /// Latest price per share (from a read-only quote), used to value the holding.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub price: Option<f64>,
-    /// Today's percent change for the symbol (last vs. previous close).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub change_pct: Option<f64>,
-    /// Recent intraday price points (oldest→newest) for the row's sparkline.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub spark: Vec<f64>,
-}
-
-/// Account-level money summary (best-effort; every field optional).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AccountSummary {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub portfolio_value: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub buying_power: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cash: Option<f64>,
-    pub currency: String,
-}
-
-/// The read-only snapshot returned to the frontend.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Portfolio {
-    pub positions: Vec<Position>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub account: Option<AccountSummary>,
-    /// RFC3339 time the snapshot was taken.
-    pub as_of: String,
-    /// Which MCP tools the data came from (provenance shown in the UI).
-    pub tools_used: Vec<String>,
-    /// Best-effort notes about enrichment misses (keys/shapes only, never values),
-    /// surfaced subtly in the UI so an empty Value/Today column is explainable.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub debug: Vec<String>,
-}
-
-impl Portfolio {
-    /// Uppercased tickers the user actually holds (quantity > 0). Used to badge
-    /// research picks the user already owns.
-    pub fn owned_tickers(&self) -> BTreeSet<String> {
-        self.positions
-            .iter()
-            .filter(|p| p.quantity > 0.0 && !p.ticker.is_empty())
-            .map(|p| p.ticker.to_ascii_uppercase())
-            .collect()
-    }
-}
 
 /// Whether a tool is safe to call in read-only mode. Deny wins over allow.
 pub fn is_read_only_tool(name: &str) -> bool {

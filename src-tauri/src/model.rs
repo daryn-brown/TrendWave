@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 /// A supply-chain / capacity / production chokepoint the model identified for
@@ -121,6 +123,77 @@ pub struct ResearchResult {
     pub bottlenecks: Vec<Bottleneck>,
     pub candidates: Vec<Candidate>,
     pub disclaimer: String,
+}
+
+// ---------------------------------------------------------------------------
+// Broker portfolio (read-only) — shared by every brokerage integration
+// (Robinhood MCP, Questrade REST, …). The shapes are deliberately broker-agnostic
+// so the same frontend panel renders any connected account.
+// ---------------------------------------------------------------------------
+
+/// A single equity position held in a connected account.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Position {
+    pub ticker: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub quantity: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub market_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub average_buy_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrealized_plpc: Option<f64>,
+    pub currency: String,
+    /// Latest price per share (from a read-only quote), used to value the holding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<f64>,
+    /// Today's percent change for the symbol (last vs. previous close).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_pct: Option<f64>,
+    /// Recent intraday price points (oldest→newest) for the row's sparkline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spark: Vec<f64>,
+}
+
+/// Account-level money summary (best-effort; every field optional).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AccountSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub portfolio_value: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buying_power: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cash: Option<f64>,
+    pub currency: String,
+}
+
+/// The read-only snapshot returned to the frontend.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Portfolio {
+    pub positions: Vec<Position>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<AccountSummary>,
+    /// RFC3339 time the snapshot was taken.
+    pub as_of: String,
+    /// Which data sources / tools the data came from (provenance shown in the UI).
+    pub tools_used: Vec<String>,
+    /// Best-effort notes about enrichment misses (keys/shapes only, never values),
+    /// surfaced subtly in the UI so an empty Value/Today column is explainable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub debug: Vec<String>,
+}
+
+impl Portfolio {
+    /// Uppercased tickers the user actually holds (quantity > 0). Used to badge
+    /// research picks the user already owns.
+    pub fn owned_tickers(&self) -> BTreeSet<String> {
+        self.positions
+            .iter()
+            .filter(|p| p.quantity > 0.0 && !p.ticker.is_empty())
+            .map(|p| p.ticker.to_ascii_uppercase())
+            .collect()
+    }
 }
 
 /// Streamed to the frontend over a Tauri channel so the prompt UI can show live
