@@ -1,7 +1,9 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  Portfolio,
   ProgressEvent,
   ResearchResult,
+  RobinhoodStatus,
   Settings,
   Watchlist,
 } from "./types";
@@ -38,3 +40,14 @@ export const createWatchlist = (name: string, prompt: string) =>
 
 export const deleteWatchlist = (id: number) =>
   invoke<void>("delete_watchlist", { id });
+
+// --- Robinhood (read-only MCP integration) ---------------------------------
+
+export const robinhoodStatus = () => invoke<RobinhoodStatus>("robinhood_status");
+
+// Opens the system browser for OAuth; resolves once authorized + first snapshot.
+export const robinhoodConnect = () => invoke<RobinhoodStatus>("robinhood_connect");
+
+export const robinhoodDisconnect = () => invoke<void>("robinhood_disconnect");
+
+export const robinhoodPortfolio = () => invoke<Portfolio>("robinhood_portfolio");

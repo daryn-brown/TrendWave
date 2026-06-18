@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -168,6 +169,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     http: &reqwest::Client,
     settings: &Settings,
     prompt: &str,
+    owned: &BTreeSet<String>,
     emit: &F,
 ) -> AppResult<ResearchResult> {
     emit(ProgressEvent::Stage {
@@ -179,7 +181,18 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         stage: "bottlenecks".into(),
         message: "Identifying current bottlenecks…".into(),
     });
-    let plan: BottleneckPlan = ollama.generate_json(SYSTEM_BOTTLENECK, prompt).await?;
+    // Give the model read-only context about what the user already holds, so it
+    // can acknowledge existing positions. Ranking still happens on merit below.
+    let user_prompt = if owned.is_empty() {
+        prompt.to_string()
+    } else {
+        let held = owned.iter().cloned().collect::<Vec<_>>().join(", ");
+        format!(
+            "{prompt}\n\nContext (read-only): the user already holds these tickers in their \
+             Robinhood account: {held}. This is background only — rank purely on merit."
+        )
+    };
+    let plan: BottleneckPlan = ollama.generate_json(SYSTEM_BOTTLENECK, &user_prompt).await?;
 
     let industry = plan
         .industry
@@ -234,6 +247,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                     sentiment: None,
                     news: Vec::new(),
                     score: 0.0,
+                    owned: false,
                 },
             });
         }
@@ -368,6 +382,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
         );
         w.candidate.score = penalize_for_identity(base, w.candidate.identity_mismatch);
+        w.candidate.owned = owned.contains(&w.candidate.ticker.to_ascii_uppercase());
     }
     working.sort_by(|a, b| {
         b.candidate
