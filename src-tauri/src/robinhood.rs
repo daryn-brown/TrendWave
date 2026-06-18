@@ -15,7 +15,7 @@
 //! output isn't pinned here, so we look for the common key spellings and parse
 //! numbers whether they arrive as numbers or strings.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,6 +40,15 @@ pub struct Position {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unrealized_plpc: Option<f64>,
     pub currency: String,
+    /// Latest price per share (from a read-only quote), used to value the holding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<f64>,
+    /// Today's percent change for the symbol (last vs. previous close).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_pct: Option<f64>,
+    /// Recent intraday price points (oldest→newest) for the row's sparkline.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spark: Vec<f64>,
 }
 
 /// Account-level money summary (best-effort; every field optional).
@@ -375,6 +384,7 @@ pub fn parse_positions(v: &Value) -> Vec<Position> {
             ),
             unrealized_plpc: num(&rec, &["unrealized_plpc", "total_return_pct", "gain_loss_pct"]),
             currency: text(&rec, &["currency"]).unwrap_or_else(|| "USD".to_string()),
+            ..Default::default()
         });
     }
     out
@@ -451,6 +461,102 @@ fn merge_account(existing: Option<AccountSummary>, next: AccountSummary) -> Acco
 /// A connected, read-only Robinhood session built on the MCP client.
 pub struct RobinhoodClient {
     mcp: McpClient,
+}
+
+/// Most intraday points we keep for a row's sparkline (newest retained).
+const SPARK_MAX_POINTS: usize = 48;
+
+/// A lightweight quote: enough to value a holding and show today's change.
+#[derive(Debug, Clone, Default)]
+struct Quote {
+    price: Option<f64>,
+    change_pct: Option<f64>,
+}
+
+/// First read-only tool whose lowercased name contains *all* of `needles`
+/// (e.g. `["equit", "quote"]` → `get_equity_quotes`).
+fn find_named<'a>(tools: &'a [ToolInfo], needles: &[&str]) -> Option<&'a ToolInfo> {
+    tools.iter().find(|t| {
+        let n = t.name.to_ascii_lowercase();
+        is_safe_read_tool(t) && needles.iter().all(|needle| n.contains(needle))
+    })
+}
+
+/// Whether a tool's input schema advertises a property named `key`.
+fn schema_has_prop(t: &ToolInfo, key: &str) -> bool {
+    t.input_schema
+        .as_ref()
+        .and_then(|s| s.get("properties"))
+        .and_then(Value::as_object)
+        .is_some_and(|props| props.contains_key(key))
+}
+
+/// Parse a quotes payload into `ticker → quote`. Schema-tolerant about the price
+/// and previous-close key spellings; derives today's percent change when it isn't
+/// reported directly.
+fn parse_quotes(v: &Value) -> HashMap<String, Quote> {
+    let mut out = HashMap::new();
+    for rec in find_records(v) {
+        let Some(sym) = text(&rec, &["symbol", "ticker", "instrument_symbol"])
+            .map(|s| s.to_ascii_uppercase())
+            .filter(|s| looks_like_ticker(s))
+        else {
+            continue;
+        };
+        let price = num(
+            &rec,
+            &[
+                "last_trade_price", "last_price", "last_extended_hours_trade_price",
+                "mark_price", "price", "ask_price",
+            ],
+        );
+        let prev_close = num(
+            &rec,
+            &["previous_close", "adjusted_previous_close", "prev_close", "previousClose"],
+        );
+        let change_pct = num(
+            &rec,
+            &["change_percent_today", "percent_change", "change_pct", "todays_change_pct"],
+        )
+        .or_else(|| match (price, prev_close) {
+            (Some(p), Some(pc)) if pc != 0.0 => Some((p - pc) / pc * 100.0),
+            _ => None,
+        });
+        out.insert(sym, Quote { price, change_pct });
+    }
+    out
+}
+
+/// Parse a historicals payload into `ticker → close-price series` (oldest→newest),
+/// trimmed to the most recent `SPARK_MAX_POINTS`.
+fn parse_historicals(v: &Value) -> HashMap<String, Vec<f64>> {
+    const SERIES_KEYS: &[&str] =
+        &["historicals", "data_points", "points", "history", "series", "candles", "results"];
+    let mut out = HashMap::new();
+    for rec in find_records(v) {
+        let Some(sym) = text(&rec, &["symbol", "ticker"])
+            .map(|s| s.to_ascii_uppercase())
+            .filter(|s| looks_like_ticker(s))
+        else {
+            continue;
+        };
+        let series = SERIES_KEYS
+            .iter()
+            .find_map(|k| rec.get(*k).and_then(Value::as_array))
+            .cloned()
+            .unwrap_or_default();
+        let mut prices: Vec<f64> = series
+            .iter()
+            .filter_map(|p| num(p, &["close_price", "close", "price", "last_trade_price", "open_price"]))
+            .collect();
+        if prices.len() > SPARK_MAX_POINTS {
+            prices = prices.split_off(prices.len() - SPARK_MAX_POINTS);
+        }
+        if !prices.is_empty() {
+            out.insert(sym, prices);
+        }
+    }
+    out
 }
 
 impl RobinhoodClient {
@@ -563,12 +669,89 @@ impl RobinhoodClient {
             )));
         }
 
+        // Phase 4 — enrich held positions with a live value and a today sparkline.
+        // Best-effort and read-only: any failure here leaves positions intact.
+        let symbols: Vec<String> = positions
+            .iter()
+            .filter(|p| p.quantity > 0.0 && !p.ticker.is_empty())
+            .map(|p| p.ticker.clone())
+            .collect();
+        if !symbols.is_empty() {
+            self.enrich_positions(&tools, &symbols, &mut positions, &mut tools_used)
+                .await;
+        }
+
         Ok(Portfolio {
             positions,
             account,
             as_of: chrono::Utc::now().to_rfc3339(),
             tools_used,
         })
+    }
+
+    /// Fill each held position's price/value and today's change from a read-only
+    /// equity quote, and attach a recent intraday series for its sparkline from a
+    /// read-only historicals call. Entirely best-effort.
+    async fn enrich_positions(
+        &self,
+        tools: &[ToolInfo],
+        symbols: &[String],
+        positions: &mut [Position],
+        tools_used: &mut Vec<String>,
+    ) {
+        // Quotes → price, today's %, and a computed market value.
+        if let Some(t) = find_named(tools, &["equit", "quote"]) {
+            if let Ok(res) = self.mcp.call_tool(&t.name, json!({ "symbols": symbols })).await {
+                let quotes = parse_quotes(&tool_result_value(&res));
+                if !quotes.is_empty() {
+                    for p in positions.iter_mut() {
+                        if let Some(q) = quotes.get(&p.ticker) {
+                            if let Some(price) = q.price {
+                                p.price = Some(price);
+                                if p.market_value.is_none() {
+                                    p.market_value = Some(price * p.quantity);
+                                }
+                            }
+                            p.change_pct = q.change_pct.or(p.change_pct);
+                        }
+                    }
+                    tools_used.push(t.name.clone());
+                }
+            }
+        }
+
+        // Historicals → an intraday sparkline series. The window starts a few days
+        // back so the most recent trading session is captured even on a Monday or
+        // after a holiday; the series is trimmed to its most-recent tail.
+        if let Some(t) = find_named(tools, &["equit", "historical"]) {
+            let mut args = serde_json::Map::new();
+            args.insert("symbols".into(), json!(symbols));
+            let start = chrono::Utc::now() - chrono::Duration::days(4);
+            args.insert("start_time".into(), json!(start.to_rfc3339()));
+            for (k, v) in [("interval", "5minute"), ("bounds", "regular"), ("span", "day")] {
+                if schema_has_prop(t, k) {
+                    args.insert(k.into(), json!(v));
+                }
+            }
+            if let Ok(res) = self.mcp.call_tool(&t.name, Value::Object(args)).await {
+                let series = parse_historicals(&tool_result_value(&res));
+                if !series.is_empty() {
+                    for p in positions.iter_mut() {
+                        if let Some(s) = series.get(&p.ticker) {
+                            p.spark = s.clone();
+                            if p.change_pct.is_none() {
+                                if let (Some(first), Some(last)) = (s.first(), s.last()) {
+                                    if *first != 0.0 {
+                                        p.change_pct = Some((last - first) / first * 100.0);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    tools_used.push(t.name.clone());
+                }
+            }
+        }
     }
 }
 
@@ -856,5 +1039,78 @@ mod tests {
         let text = json!({ "content": [{ "type": "text", "text": "[{\"symbol\":\"AAPL\",\"quantity\":1}]" }] });
         let parsed = tool_result_value(&text);
         assert!(parsed.is_array());
+    }
+
+    #[test]
+    fn parse_quotes_reads_price_and_derives_change() {
+        let v = json!({
+            "results": [
+                { "symbol": "aapl", "last_trade_price": "200.00", "previous_close": "190.00" },
+                { "symbol": "MSFT", "price": 400.0, "change_percent_today": -1.5 },
+            ]
+        });
+        let q = parse_quotes(&v);
+        let aapl = q.get("AAPL").expect("aapl present");
+        assert_eq!(aapl.price, Some(200.0));
+        // (200 - 190) / 190 * 100 ≈ 5.263…
+        assert!((aapl.change_pct.unwrap() - 5.263157).abs() < 1e-3);
+        let msft = q.get("MSFT").expect("msft present");
+        assert_eq!(msft.price, Some(400.0));
+        assert_eq!(msft.change_pct, Some(-1.5));
+    }
+
+    #[test]
+    fn parse_historicals_collects_close_series_per_symbol() {
+        let v = json!({
+            "results": [{
+                "symbol": "AAPL",
+                "historicals": [
+                    { "close_price": "10.0" },
+                    { "close_price": "11.0" },
+                    { "close_price": "12.5" },
+                ]
+            }]
+        });
+        let h = parse_historicals(&v);
+        assert_eq!(h.get("AAPL").unwrap(), &vec![10.0, 11.0, 12.5]);
+    }
+
+    #[test]
+    fn parse_historicals_trims_to_spark_cap() {
+        let points: Vec<Value> = (0..SPARK_MAX_POINTS + 20)
+            .map(|i| json!({ "close": i as f64 }))
+            .collect();
+        let v = json!({ "results": [{ "symbol": "AAPL", "historicals": points }] });
+        let series = parse_historicals(&v).remove("AAPL").unwrap();
+        assert_eq!(series.len(), SPARK_MAX_POINTS);
+        // Keeps the tail (most recent points).
+        assert_eq!(*series.last().unwrap(), (SPARK_MAX_POINTS + 19) as f64);
+    }
+
+    #[test]
+    fn find_named_requires_all_needles_and_read_safety() {
+        let tools = vec![
+            tool("get_option_quotes"),
+            tool("get_equity_quotes"),
+            tool("place_equity_order"),
+        ];
+        assert_eq!(find_named(&tools, &["equit", "quote"]).unwrap().name, "get_equity_quotes");
+        // A mutating equity tool is never returned.
+        assert!(find_named(&vec![tool("place_equity_order")], &["equit", "order"]).is_none());
+    }
+
+    #[test]
+    fn schema_has_prop_detects_optional_params() {
+        let t = ToolInfo {
+            name: "get_equity_historicals".into(),
+            input_schema: Some(json!({
+                "type": "object",
+                "properties": { "symbols": {}, "start_time": {}, "interval": {} },
+                "required": ["symbols", "start_time"],
+            })),
+            annotations: None,
+        };
+        assert!(schema_has_prop(&t, "interval"));
+        assert!(!schema_has_prop(&t, "bounds"));
     }
 }

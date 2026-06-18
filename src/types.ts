@@ -62,6 +62,9 @@ export interface Position {
   average_buy_price?: number | null;
   unrealized_plpc?: number | null;
   currency: string;
+  price?: number | null;
+  change_pct?: number | null;
+  spark?: number[];
 }
 
 export interface AccountSummary {
