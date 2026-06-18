@@ -81,6 +81,11 @@ export const IconMoon = ({ className = base }: IconProps) => (
     <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
   </svg>
 );
+export const IconLock = ({ className = base }: IconProps) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+  </svg>
+);
 
 // ---- Formatting helpers -----------------------------------------------------
 
@@ -600,6 +605,7 @@ export function SettingsModal({
   robinhoodBusy,
   onConnectRobinhood,
   onDisconnectRobinhood,
+  biometricAvailable,
 }: {
   settings: Settings;
   onSave: (s: Settings) => void;
@@ -608,6 +614,7 @@ export function SettingsModal({
   robinhoodBusy: boolean;
   onConnectRobinhood: () => void;
   onDisconnectRobinhood: () => void;
+  biometricAvailable: boolean;
 }) {
   const [form, setForm] = useState<Settings>(settings);
   const update = <K extends keyof Settings>(key: K, value: Settings[K]) =>
@@ -640,6 +647,9 @@ export function SettingsModal({
             busy={robinhoodBusy}
             onConnect={onConnectRobinhood}
             onDisconnect={onDisconnectRobinhood}
+            biometricAvailable={biometricAvailable}
+            requireBiometric={form.require_biometric_unlock}
+            onToggleRequireBiometric={(v) => update("require_biometric_unlock", v)}
           />
         </div>
 
@@ -663,11 +673,17 @@ function RobinhoodSection({
   busy,
   onConnect,
   onDisconnect,
+  biometricAvailable,
+  requireBiometric,
+  onToggleRequireBiometric,
 }: {
   status: RobinhoodStatus | null;
   busy: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  biometricAvailable: boolean;
+  requireBiometric: boolean;
+  onToggleRequireBiometric: (v: boolean) => void;
 }) {
   const connected = status?.connected ?? false;
   return (
@@ -703,6 +719,22 @@ function RobinhoodSection({
         Read-only. TrendWave reads your positions to flag picks you already own — it can’t place,
         modify, or cancel trades. A browser window opens for you to sign in to Robinhood.
       </p>
+      {biometricAvailable && (
+        <label className="mt-3 flex items-start gap-2 border-t border-slate-100 pt-3 text-sm text-slate-700 dark:border-slate-800 dark:text-slate-200">
+          <input
+            type="checkbox"
+            checked={requireBiometric}
+            onChange={(e) => onToggleRequireBiometric(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-slate-300 dark:border-slate-600 dark:bg-slate-800"
+          />
+          <span>
+            Require Touch ID / Windows Hello on launch
+            <span className="mt-0.5 block text-[11px] font-normal leading-4 text-slate-400 dark:text-slate-500">
+              Unlock with biometrics before your saved Robinhood session is shown.
+            </span>
+          </span>
+        </label>
+      )}
     </div>
   );
 }
@@ -867,6 +899,34 @@ export function PortfolioPanel({
           Live values unavailable for some rows — {portfolio.debug.join("; ")}
         </p>
       )}
+    </section>
+  );
+}
+
+export function PortfolioLocked({ busy, onUnlock }: { busy: boolean; onUnlock: () => void }) {
+  return (
+    <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-[0_18px_50px_-40px_rgba(15,23,42,0.5)] dark:border-slate-800 dark:bg-slate-900 dark:shadow-[0_18px_50px_-40px_rgba(0,0,0,0.8)]">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+            Your portfolio
+          </h2>
+          <span className="flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700 ring-1 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/25">
+            <IconLock className="h-3 w-3" /> Locked
+          </span>
+        </div>
+        <button
+          onClick={onUnlock}
+          disabled={busy}
+          className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
+        >
+          {busy ? "Unlocking…" : "Unlock"}
+        </button>
+      </div>
+      <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+        Your saved Robinhood session is protected. Unlock with Touch ID or Windows Hello to view your
+        positions — research still works without unlocking.
+      </p>
     </section>
   );
 }

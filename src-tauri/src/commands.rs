@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::Connection;
@@ -6,6 +7,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
 
+use crate::biometric;
 use crate::db::{self, Watchlist};
 use crate::error::{AppError, AppResult};
 use crate::model::{ProgressEvent, ResearchResult};
@@ -20,11 +22,13 @@ use crate::settings::Settings;
 /// for short, synchronous queries and never across an `.await`. The HTTP client
 /// is internally ref-counted and cheap to clone for each async task. `robinhood`
 /// caches the last read-only portfolio snapshot so research can badge owned
-/// tickers without a network round-trip.
+/// tickers without a network round-trip. `unlocked` tracks whether the user has
+/// passed the biometric gate this run (in-memory only, so it resets each launch).
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub http: reqwest::Client,
     pub robinhood: Mutex<Option<Portfolio>>,
+    pub unlocked: AtomicBool,
 }
 
 impl AppState {
@@ -32,6 +36,24 @@ impl AppState {
         self.db
             .lock()
             .map_err(|_| AppError::Database("database lock was poisoned".into()))
+    }
+
+    /// True when a connected Robinhood session is currently gated behind an
+    /// unmet biometric unlock. Degrades to unlocked when biometrics are
+    /// unavailable or the user hasn't opted in, so the gate can never strand a
+    /// session the user can't get back into.
+    fn portfolio_locked(&self) -> AppResult<bool> {
+        if !biometric::is_available() {
+            return Ok(false);
+        }
+        let require = {
+            let conn = self.lock_db()?;
+            db::load_settings(&conn)?.require_biometric_unlock
+        };
+        if !require || !oauth::is_connected() {
+            return Ok(false);
+        }
+        Ok(!self.unlocked.load(Ordering::Relaxed))
     }
 }
 
@@ -95,21 +117,26 @@ pub async fn delete_watchlist(state: State<'_, AppState>, id: i64) -> AppResult<
 }
 
 /// Read-only Robinhood connection status plus the last cached portfolio snapshot.
+/// `locked` is true when a connected session is hidden behind an unmet biometric
+/// unlock — the frontend shows an unlock prompt rather than the portfolio.
 #[derive(serde::Serialize)]
 pub struct RobinhoodStatus {
     pub connected: bool,
+    pub locked: bool,
     pub portfolio: Option<Portfolio>,
 }
 
 #[tauri::command]
 pub async fn robinhood_status(state: State<'_, AppState>) -> AppResult<RobinhoodStatus> {
-    let portfolio = state
-        .robinhood
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone());
+    let locked = state.portfolio_locked()?;
+    let portfolio = if locked {
+        None
+    } else {
+        state.robinhood.lock().ok().and_then(|guard| guard.clone())
+    };
     Ok(RobinhoodStatus {
         connected: oauth::is_connected(),
+        locked,
         portfolio,
     })
 }
@@ -130,9 +157,14 @@ pub async fn robinhood_connect(
     })
     .await?;
 
+    // The user just completed an interactive sign-in, so they're plainly present
+    // — unlock the session now and let the biometric gate apply on later launches.
+    state.unlocked.store(true, Ordering::Relaxed);
+
     let portfolio = fetch_and_cache(&state).await.ok();
     Ok(RobinhoodStatus {
         connected: true,
+        locked: false,
         portfolio,
     })
 }
@@ -140,6 +172,7 @@ pub async fn robinhood_connect(
 #[tauri::command]
 pub async fn robinhood_disconnect(state: State<'_, AppState>) -> AppResult<()> {
     oauth::clear_auth()?;
+    state.unlocked.store(false, Ordering::Relaxed);
     if let Ok(mut guard) = state.robinhood.lock() {
         *guard = None;
     }
@@ -147,9 +180,31 @@ pub async fn robinhood_disconnect(state: State<'_, AppState>) -> AppResult<()> {
 }
 
 /// Force a fresh read-only portfolio fetch (refreshing the token if needed).
+/// Refuses while the biometric gate is engaged.
 #[tauri::command]
 pub async fn robinhood_portfolio(state: State<'_, AppState>) -> AppResult<Portfolio> {
+    if state.portfolio_locked()? {
+        return Err(AppError::Locked);
+    }
     fetch_and_cache(&state).await
+}
+
+/// Whether this device supports a biometric / device-auth unlock prompt.
+#[tauri::command]
+pub async fn biometric_available() -> AppResult<bool> {
+    Ok(biometric::is_available())
+}
+
+/// Prompt for Touch ID / Windows Hello and, on success, unlock the saved
+/// Robinhood session for the rest of this run. Returns whether it unlocked;
+/// a dismissed or failed prompt resolves to `false` (no error banner).
+#[tauri::command]
+pub async fn biometric_unlock(state: State<'_, AppState>) -> AppResult<bool> {
+    let unlocked = biometric::authenticate("unlock your saved Robinhood session").await?;
+    if unlocked {
+        state.unlocked.store(true, Ordering::Relaxed);
+    }
+    Ok(unlocked)
 }
 
 /// Pull a read-only portfolio via the MCP client and cache it for enrichment.
