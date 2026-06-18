@@ -330,7 +330,7 @@ export function CandidateCard({ candidate }: { candidate: Candidate }) {
                 : "bg-rose-50 text-rose-700 ring-rose-100"
             }`}
           >
-            Rev {formatGrowthPct(candidate.growth.revenue_growth_yoy)} YoY
+            Rev {formatGrowthPct(candidate.growth.revenue_growth_yoy)} {candidate.growth.annual_growth ? "YoY" : "qtr"}
           </span>
         ) : (
           <span className="rounded-full bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-600 ring-1 ring-slate-100">
@@ -393,9 +393,11 @@ function Field({ label, value }: { label: string; value: string }) {
 
 function GrowthPanel({ growth }: { growth: GrowthData }) {
   const stats: { label: string; value: string; tone: string }[] = [];
+  const period = growth.annual_growth ? "YoY" : "YoY (qtr)";
+  const hasEdgar = growth.source.includes("EDGAR");
   if (growth.revenue_growth_yoy != null)
     stats.push({
-      label: "Revenue YoY",
+      label: `Revenue ${period}`,
       value: formatGrowthPct(growth.revenue_growth_yoy),
       tone: growthTone(growth.revenue_growth_yoy),
     });
@@ -407,7 +409,7 @@ function GrowthPanel({ growth }: { growth: GrowthData }) {
     });
   if (growth.earnings_growth_yoy != null)
     stats.push({
-      label: "Earnings YoY",
+      label: `Earnings ${period}`,
       value: formatGrowthPct(growth.earnings_growth_yoy),
       tone: growthTone(growth.earnings_growth_yoy),
     });
@@ -443,6 +445,12 @@ function GrowthPanel({ growth }: { growth: GrowthData }) {
           </div>
         ))}
       </dl>
+      {!hasEdgar && (
+        <p className="mt-2 text-[10px] leading-4 text-amber-600">
+          No SEC filings found for this listing — figures are Yahoo’s latest-quarter market data,
+          not audited annual results. Treat with caution.
+        </p>
+      )}
     </div>
   );
 }

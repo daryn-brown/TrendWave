@@ -72,6 +72,11 @@ fn build_growth(edgar: Option<EdgarOut>, yahoo: Option<YahooMetrics>) -> Option<
         g.profitable = e.profitable;
         g.years = e.years;
     }
+    // The YoY figures are audited *annual* numbers only when EDGAR supplied the
+    // revenue series; capture that before the Yahoo fallback below, which fills
+    // gaps with most-recent-quarter growth.
+    g.annual_growth = g.revenue_growth_yoy.is_some();
+
     if let Some(y) = yahoo {
         g.forward_pe = y.forward_pe;
         g.analyst_upside = y.analyst_upside;
@@ -593,7 +598,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(edgar_only.source, "SEC EDGAR");
+        assert!(edgar_only.annual_growth); // EDGAR revenue series => annual
         assert!(build_growth(None, None).is_none());
+    }
+
+    #[test]
+    fn yahoo_only_growth_is_marked_quarterly() {
+        let yahoo_only = build_growth(
+            None,
+            Some(YahooMetrics {
+                forward_pe: Some(12.0),
+                analyst_upside: Some(0.05),
+                revenue_growth: Some(0.264),
+                earnings_growth: Some(0.1),
+            }),
+        )
+        .unwrap();
+        assert_eq!(yahoo_only.source, "Yahoo Finance");
+        assert!(!yahoo_only.annual_growth); // Yahoo => most-recent-quarter
+        assert_eq!(yahoo_only.revenue_growth_yoy, Some(0.264));
     }
 
     #[test]

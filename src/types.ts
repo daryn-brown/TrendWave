@@ -22,6 +22,7 @@ export interface GrowthData {
   forward_pe?: number | null;
   analyst_upside?: number | null;
   years?: number | null;
+  annual_growth?: boolean;
   source: string;
 }
 
