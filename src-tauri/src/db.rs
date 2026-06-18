@@ -32,6 +32,10 @@ pub fn init(conn: &Connection) -> AppResult<()> {
             last_result TEXT,
             last_run_at TEXT,
             created_at  TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS app_flags (
+            key   TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
         );",
     )?;
     Ok(())
@@ -55,6 +59,37 @@ pub fn save_settings(conn: &Connection, settings: &Settings) -> AppResult<()> {
         "INSERT INTO settings (id, data) VALUES (1, ?1)
          ON CONFLICT(id) DO UPDATE SET data = excluded.data",
         [data],
+    )?;
+    Ok(())
+}
+
+/// Non-secret app flags live in their own tiny KV table so launch-time code can
+/// answer questions like "is a broker connected?" without touching the OS
+/// keychain — reading a stored credential pops a system password prompt, and we
+/// only want that on an explicit unlock/load, never on every app open.
+pub const FLAG_ROBINHOOD_CONNECTED: &str = "robinhood_connected";
+pub const FLAG_QUESTRADE_CONNECTED: &str = "questrade_connected";
+pub const FLAG_BIO_DEFAULT_MIGRATED: &str = "bio_default_migrated";
+
+/// Read a boolean flag; absent keys read as `false`.
+pub fn get_flag(conn: &Connection, key: &str) -> AppResult<bool> {
+    let mut stmt = conn.prepare("SELECT value FROM app_flags WHERE key = ?1")?;
+    let mut rows = stmt.query([key])?;
+    match rows.next()? {
+        Some(row) => {
+            let value: i64 = row.get(0)?;
+            Ok(value != 0)
+        }
+        None => Ok(false),
+    }
+}
+
+/// Upsert a boolean flag.
+pub fn set_flag(conn: &Connection, key: &str, value: bool) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO app_flags (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        rusqlite::params![key, value as i64],
     )?;
     Ok(())
 }
