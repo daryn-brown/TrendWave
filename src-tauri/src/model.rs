@@ -196,6 +196,33 @@ impl Portfolio {
     }
 }
 
+/// A tradable listing of a security on one exchange. Used by the Buy action to
+/// deep-link the right symbol at a brokerage (and to spot a Canadian interlisting
+/// so Canadian brokers can avoid an FX conversion).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Listing {
+    pub symbol: String,
+    /// Human exchange label from the source (e.g. "Toronto", "NASDAQ"), best-effort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exchange: Option<String>,
+    /// Trading currency for the listing when known (e.g. "CAD", "USD").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+}
+
+/// Resolved listings for a research pick so the frontend can route each broker to
+/// the right ticker: the primary US/base listing (with its exchange, used by
+/// brokers whose deep-link needs an exchange prefix) and, when one exists, a
+/// same-security Canadian interlisting for Canadian brokers (CAD, no FX).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListingInfo {
+    pub us_symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub us_exchange: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canadian: Option<Listing>,
+}
+
 /// Streamed to the frontend over a Tauri channel so the prompt UI can show live
 /// progress ("Identifying bottlenecks…", "Pricing candidates…") like an agent.
 #[derive(Debug, Clone, Serialize)]

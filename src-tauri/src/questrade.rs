@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::model::{AccountSummary, Portfolio, Position};
+use crate::model::{AccountSummary, Listing, Portfolio, Position};
 
 /// Questrade's OAuth token endpoint. The refresh-token grant is a GET with the
 /// parameters in the query string; it returns the access token and the
@@ -350,6 +350,27 @@ struct QtSymbol {
     currency: Option<String>,
 }
 
+/// Result rows from `symbols/search` (a different shape than `symbols?ids=`):
+/// these carry the human `symbol` string, listing exchange, and tradability.
+#[derive(Debug, Deserialize)]
+struct SymbolSearchResp {
+    #[serde(default)]
+    symbols: Vec<SymbolSearchItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SymbolSearchItem {
+    #[serde(default)]
+    symbol: Option<String>,
+    #[serde(default)]
+    listing_exchange: Option<String>,
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default)]
+    is_tradable: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 struct QuotesResp {
     #[serde(default)]
@@ -482,6 +503,51 @@ impl QuestradeClient {
         resp.json::<T>()
             .await
             .map_err(|e| AppError::Questrade(format!("malformed {path} response: {e}")))
+    }
+
+    /// Find the best tradable Questrade listing for `symbol`, preferring a
+    /// Canadian (CAD) listing of the same security so a Canadian account can buy
+    /// it without an FX conversion. Returns `None` when Questrade lists nothing
+    /// matching. Read-only: this only searches the symbol catalogue.
+    pub async fn find_listing(&self, symbol: &str) -> AppResult<Option<Listing>> {
+        let root = symbol
+            .split('.')
+            .next()
+            .unwrap_or(symbol)
+            .trim()
+            .to_ascii_uppercase();
+        if root.is_empty() {
+            return Ok(None);
+        }
+
+        let resp: SymbolSearchResp = self
+            .get_json("symbols/search", &[("prefix", root.as_str())])
+            .await?;
+
+        // Same-security matches only: the Questrade symbol's root equals ours.
+        let matches: Vec<&SymbolSearchItem> = resp
+            .symbols
+            .iter()
+            .filter(|s| s.is_tradable.unwrap_or(true))
+            .filter(|s| {
+                s.symbol
+                    .as_deref()
+                    .map(|sym| sym.split('.').next().unwrap_or(sym).eq_ignore_ascii_case(&root))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        let pick = matches
+            .iter()
+            .copied()
+            .find(|s| s.currency.as_deref().map(|c| c.eq_ignore_ascii_case("CAD")).unwrap_or(false))
+            .or_else(|| matches.first().copied());
+
+        Ok(pick.map(|s| Listing {
+            symbol: s.symbol.clone().unwrap_or_default(),
+            exchange: s.listing_exchange.clone(),
+            currency: s.currency.clone(),
+        }))
     }
 
     /// Handshake-free: pull every account, its positions and balances, then
