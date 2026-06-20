@@ -63,3 +63,39 @@ jobs:
       - name: Test backend
         working-directory: src-tauri
         run: cargo test --locked
+
+  # Fast, build-free guard for a failure neither build-and-test nor CodeQL can see:
+  # `tauri build` aborts with "version mismatched Tauri packages" unless the Rust
+  # `tauri` crate and the `@tauri-apps/api` JS package share the same major.minor.
+  # A dependabot bump to one side without the other (e.g. the Cargo `tauri` crate
+  # moving ahead of the npm api pinned in package-lock.json) type-checks, bundles
+  # and tests clean above but breaks the auto-publishing release on main — so fail
+  # the PR here instead, before it can be merged.
+  tauri-version-alignment:
+    runs-on: ubuntu-latest
+    permissions:
+      # Only needs to read the two lockfiles it compares.
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Don't persist the GITHUB_TOKEN in .git/config after checkout.
+          persist-credentials: false
+
+      - name: '@tauri-apps/api must match the tauri crate (major.minor)'
+        run: |
+          # Resolve the *locked* versions both the build and the bundle actually use:
+          # the npm api from package-lock.json and the Rust crate from Cargo.lock.
+          API=$(jq -r '.packages["node_modules/@tauri-apps/api"].version' package-lock.json)
+          CRATE=$(awk -F'"' '/^name = "tauri"$/{getline; print $2; exit}' src-tauri/Cargo.lock)
+          echo "npm @tauri-apps/api = ${API:-<unresolved>}"
+          echo "cargo tauri crate   = ${CRATE:-<unresolved>}"
+          if [ -z "$API" ] || [ -z "$CRATE" ]; then
+            echo "::error::Could not resolve both versions to compare them."
+            exit 1
+          fi
+          if [ "${API%.*}" != "${CRATE%.*}" ]; then
+            echo "::error::@tauri-apps/api ($API) and the tauri crate ($CRATE) must be on the same major.minor. Bump @tauri-apps/api in package.json + package-lock.json (and usually @tauri-apps/cli) to match the tauri crate before merging, or the release build fails with 'version mismatched Tauri packages'."
+            exit 1
+          fi
+          echo "OK: @tauri-apps/api and the tauri crate are aligned on ${API%.*}."
