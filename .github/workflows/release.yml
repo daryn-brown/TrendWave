@@ -1,7 +1,10 @@
 name: release
 
-# Build and publish signed, auto-updatable macOS and Windows apps every time main
-# changes (i.e. when a PR is merged). Each installed app checks the latest release
+# Build and publish signed, auto-updatable macOS and Windows apps whenever main's
+# committed version is bumped. Pushes that don't change the version (docs, CI,
+# refactors) are a clean no-op: the verify job below skips the build and the run
+# stays green, so this workflow only does work — and only goes red — for a real
+# release or a real problem. Each installed app checks the latest release
 # for a newer signed bundle for its own platform and updates itself in place. Both
 # platforms publish to the same `app-v<version>` release, and tauri-action merges
 # them into a single multi-platform `latest.json` (keyed by `darwin-*` and
@@ -32,9 +35,11 @@ jobs:
   # or the protected signing environment is touched. The committed version is the
   # single source of truth: read it from tauri.conf.json (the version the bundle
   # and updater manifest actually ship), confirm package.json and Cargo.toml agree,
-  # and refuse to publish if a release for this version already exists. A forgotten
-  # bump then fails loudly here instead of silently re-shipping a stale version
-  # that installed apps would never see as an update.
+  # and decide whether there's anything to release. If a release for this version
+  # is already published the version simply wasn't bumped — the normal state for
+  # most pushes — so this job skips the build cleanly (a green, no-op run) rather
+  # than failing. It only goes red on a genuine problem: the three version files
+  # disagreeing, or a real bump missing its changelog entry.
   verify:
     runs-on: ubuntu-latest
     # Only needs to read repo contents and releases to resolve/verify the version.
@@ -42,6 +47,9 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      # 'true' only when this version has no published release yet — i.e. there is
+      # actually something to build. The release and publish jobs gate on this.
+      should_release: ${{ steps.ver.outputs.should_release }}
       notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -61,22 +69,31 @@ jobs:
             echo "::error::Version mismatch — tauri.conf.json=$VERSION, package.json=$PKG, Cargo.toml=$CARGO. Set all three to the same value before merging to main."
             exit 1
           fi
-          # Block only when a *published* release for this version already exists —
-          # that means the version wasn't bumped. A leftover *draft* is from a
-          # previous run whose upload failed partway; the build legs below reuse it
-          # and re-upload the missing assets, so don't block.
+          # A *published* release for this version means the version wasn't bumped:
+          # the normal state for most pushes to main. That's not an error — skip the
+          # build cleanly (green, no-op) so this workflow only turns red on a real
+          # problem and stays trustworthy. A leftover *draft* is from a previous run
+          # whose upload failed partway; the build legs below reuse it and re-upload
+          # the missing assets, so treat that as a release to finish.
           DRAFT=$(gh release view "app-v$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null || echo absent)
           if [ "$DRAFT" = "false" ]; then
-            echo "::error::Release app-v$VERSION already exists. Bump the version in src-tauri/tauri.conf.json, package.json and src-tauri/Cargo.toml before merging to main."
-            exit 1
+            echo "::notice::app-v$VERSION is already published; no version bump, so there is nothing to release. Skipping the build (this is a normal, green no-op)."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            exit 0
           elif [ "$DRAFT" = "true" ]; then
             echo "Reusing leftover draft app-v$VERSION from a previous failed run."
           fi
           echo "Releasing version $VERSION"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Resolve release notes from changelog
         id: notes
+        # Only needed when actually releasing; skipped along with the build when the
+        # version is already published, so an old release whose changelog entry was
+        # since edited away can't make an ordinary push to main go red.
+        if: steps.ver.outputs.should_release == 'true'
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
           # Pull this version's section out of CHANGELOG.md: every line between the
@@ -115,6 +132,9 @@ jobs:
   # leg merges its platform entry into the existing draft.
   release:
     needs: verify
+    # Skip the whole build when there's nothing new to ship (version already
+    # published). This is what keeps an ordinary push to main a green no-op.
+    if: needs.verify.outputs.should_release == 'true'
     strategy:
       # Sequential legs with macOS first: if it fails, cancel Windows rather than
       # stage a Mac-less release — keeping the version free for a clean retry.
@@ -191,6 +211,8 @@ jobs:
   # good release and a re-run can finish the upload.
   publish:
     needs: [verify, release]
+    # Matches the release job's gate; also skips cleanly if release was skipped.
+    if: needs.verify.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     # Only needs to confirm the staged assets and publish the release; no signing
     # secrets, so it deliberately stays out of the protected `release` environment.
