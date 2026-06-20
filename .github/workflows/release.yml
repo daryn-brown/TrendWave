@@ -47,14 +47,29 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Each merge to main gets an incrementing version so the updater can tell
-      # an installed build it is out of date. No version bump is committed.
-      - name: Set version from run number
+      # The committed version is the single source of truth. Read it from
+      # tauri.conf.json (the version the bundle and updater manifest actually
+      # ship), confirm package.json and Cargo.toml agree, and refuse to publish
+      # if a release for this version already exists. A forgotten bump then fails
+      # loudly here instead of silently re-shipping a stale version that
+      # installed apps would never see as an update.
+      - name: Resolve and verify release version
         id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="1.0.${{ github.run_number }}"
-          node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';const c=JSON.parse(fs.readFileSync(p));c.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
-          node -e "const fs=require('fs');const p='package.json';const c=JSON.parse(fs.readFileSync(p));c.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(c,null,2)+'\n');"
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          PKG=$(node -p "require('./package.json').version")
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$CARGO" ]; then
+            echo "::error::Version mismatch — tauri.conf.json=$VERSION, package.json=$PKG, Cargo.toml=$CARGO. Set all three to the same value before merging to main."
+            exit 1
+          fi
+          if gh release view "app-v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release app-v$VERSION already exists. Bump the version in src-tauri/tauri.conf.json, package.json and src-tauri/Cargo.toml before merging to main."
+            exit 1
+          fi
+          echo "Releasing version $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build, sign and publish release
