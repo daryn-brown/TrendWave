@@ -107,6 +107,12 @@ release on launch — and whenever you click **Check for updates** in the sideba
 exists you get an **Update available** banner: click **Download &amp; install**, then **Restart now**.
 Each update is verified against an embedded public key before it is applied.
 
+The release version is the committed `version` in `src-tauri/tauri.conf.json` (kept in lockstep with
+`package.json` and `src-tauri/Cargo.toml`) — that exact value is what ships and what installed apps
+compare against. **Bump it before merging to `main`.** The workflow refuses to publish if a release
+for that version already exists, so a forgotten bump fails the build instead of silently re-shipping a
+stale version.
+
 ### Maintainer setup (one-time)
 
 Updates are signed with a [minisign](https://jedisct1.github.io/minisign/) keypair created by
