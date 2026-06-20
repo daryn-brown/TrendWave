@@ -93,19 +93,26 @@ TrendWave ships as a **self-updating desktop app** — install it once and it ke
 
 ### Install
 
-Grab the latest `.dmg` from the
+**macOS** — grab the latest `.dmg` from the
 [Releases page](https://github.com/daryn-brown/TrendWave/releases/latest), open it, and drag
 **TrendWave** into **Applications**. The app isn't signed with an Apple Developer certificate, so the
 first launch needs a one-time approval: **right-click the app → Open → Open** (or run
 `xattr -dr com.apple.quarantine /Applications/TrendWave.app`).
 
+**Windows** — grab the latest `-setup.exe` from the
+[Releases page](https://github.com/daryn-brown/TrendWave/releases/latest) and run it. The installer
+isn't signed with an Authenticode certificate yet, so SmartScreen may warn about an unknown publisher:
+click **More info → Run anyway**.
+
 ### Updating
 
-Every merge to `main` triggers the [`release` workflow](.github/workflows/release.yml), which builds a
-**signed universal macOS bundle** and publishes it as a GitHub Release. The running app checks that
-release on launch — and whenever you click **Check for updates** in the sidebar. When a newer build
-exists you get an **Update available** banner: click **Download &amp; install**, then **Restart now**.
-Each update is verified against an embedded public key before it is applied.
+Every merge to `main` triggers the [`release` workflow](.github/workflows/release.yml), which builds
+**signed macOS (universal `.dmg`) and Windows (`.exe`) bundles** and publishes them to the same GitHub
+Release. Both platforms share one multi-platform updater manifest (`latest.json`), so a single version
+bump ships to Mac and Windows in lockstep. The running app checks that release on launch — and whenever
+you click **Check for updates** in the sidebar. When a newer build exists you get an **Update
+available** banner: click **Download &amp; install**, then **Restart now**. Each update is verified
+against an embedded public key before it is applied.
 
 The release version is the committed `version` in `src-tauri/tauri.conf.json` (kept in lockstep with
 `package.json` and `src-tauri/Cargo.toml`) — that exact value is what ships and what installed apps
