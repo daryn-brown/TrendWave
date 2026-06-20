@@ -42,6 +42,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -73,6 +74,40 @@ jobs:
           fi
           echo "Releasing version $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve release notes from changelog
+        id: notes
+        run: |
+          VERSION="${{ steps.ver.outputs.version }}"
+          # Pull this version's section out of CHANGELOG.md: every line between the
+          # "## [<version>]" heading and the next "## " heading or link-reference
+          # block, with surrounding blank lines trimmed. This becomes both the GitHub
+          # release body and the in-app updater's "what's new" text, so each release
+          # ships a real, curated description instead of a generic one.
+          NOTES=$(awk -v ver="$VERSION" '
+            found && (/^## / || /^\[[^][]+\]: /) { exit }
+            found { buf[++n] = $0 }
+            $0 == "## [" ver "]" || index($0, "## [" ver "] ") == 1 { found = 1 }
+            END {
+              s = 1
+              while (s <= n && buf[s] ~ /^[[:space:]]*$/) s++
+              while (n >= s && buf[n] ~ /^[[:space:]]*$/) n--
+              for (i = s; i <= n; i++) print buf[i]
+            }
+          ' CHANGELOG.md)
+          # Refuse to ship a release with no notes: the version was bumped but its
+          # changelog entry is missing or empty. Fail here, before any build runs.
+          if [ -z "$NOTES" ]; then
+            echo "::error::No changelog entry for $VERSION. Add a '## [$VERSION]' section to CHANGELOG.md describing this release before merging to main."
+            exit 1
+          fi
+          echo "Release notes for $VERSION:"
+          echo "$NOTES"
+          {
+            echo "notes<<__TRENDWAVE_NOTES_EOF__"
+            echo "$NOTES"
+            echo "__TRENDWAVE_NOTES_EOF__"
+          } >> "$GITHUB_OUTPUT"
 
   # Build, sign and stage each platform's bundle into the shared DRAFT release. The
   # two legs run one at a time (max-parallel: 1) so they never race to update the
@@ -141,7 +176,7 @@ jobs:
         with:
           tagName: app-v${{ needs.verify.outputs.version }}
           releaseName: TrendWave v${{ needs.verify.outputs.version }}
-          releaseBody: Automated build from the latest commit on main.
+          releaseBody: ${{ needs.verify.outputs.notes }}
           releaseDraft: true
           prerelease: false
           includeUpdaterJson: true
