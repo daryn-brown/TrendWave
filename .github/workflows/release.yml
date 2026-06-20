@@ -1,8 +1,12 @@
 name: release
 
-# Build and publish a signed, auto-updatable macOS app every time main changes
-# (i.e. when a PR is merged). The running app checks the latest release for a
-# newer signed bundle and updates itself in place.
+# Build and publish signed, auto-updatable macOS and Windows apps every time main
+# changes (i.e. when a PR is merged). Each installed app checks the latest release
+# for a newer signed bundle for its own platform and updates itself in place. Both
+# platforms publish to the same `app-v<version>` release, and tauri-action merges
+# them into a single multi-platform `latest.json` (keyed by `darwin-*` and
+# `windows-x86_64`) that the updater reads — so Windows and macOS stay in lockstep
+# off the same version bump.
 on:
   push:
     branches: [main]
@@ -17,8 +21,68 @@ concurrency:
 permissions: {}
 
 jobs:
+  # Resolve and verify the version once, up front — before any platform build runs
+  # or the protected signing environment is touched. The committed version is the
+  # single source of truth: read it from tauri.conf.json (the version the bundle
+  # and updater manifest actually ship), confirm package.json and Cargo.toml agree,
+  # and refuse to publish if a release for this version already exists. A forgotten
+  # bump then fails loudly here instead of silently re-shipping a stale version
+  # that installed apps would never see as an update.
+  verify:
+    runs-on: ubuntu-latest
+    # Only needs to read repo contents and releases to resolve/verify the version.
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Don't persist the GITHUB_TOKEN in .git/config after checkout.
+          persist-credentials: false
+
+      - name: Resolve and verify release version
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          PKG=$(jq -r .version package.json)
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$CARGO" ]; then
+            echo "::error::Version mismatch — tauri.conf.json=$VERSION, package.json=$PKG, Cargo.toml=$CARGO. Set all three to the same value before merging to main."
+            exit 1
+          fi
+          if gh release view "app-v$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release app-v$VERSION already exists. Bump the version in src-tauri/tauri.conf.json, package.json and src-tauri/Cargo.toml before merging to main."
+            exit 1
+          fi
+          echo "Releasing version $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # Build, sign and publish each platform's bundle to the same release. The two
+  # legs run one at a time (max-parallel: 1) so they never race to update the
+  # shared latest.json: the first creates the release and manifest, the second
+  # merges its platform entry into the existing manifest.
   release:
-    runs-on: macos-latest
+    needs: verify
+    strategy:
+      # Sequential legs with macOS first: if it fails, cancel Windows rather than
+      # publish a Mac-less release — keeping the version free for a clean retry.
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: macos-latest
+            # Universal binary so the release runs on both Apple Silicon and Intel Macs.
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            # NSIS-only: the recommended Windows updater installer, and it keeps the
+            # updater manifest unambiguous (no NSIS-vs-MSI choice to get wrong).
+            args: --bundles nsis
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
     # Gate releases behind a protected `release` environment so required
     # reviewers must approve before the signing secrets are exposed.
     environment: release
@@ -38,7 +102,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # Empty on Windows (host target is used); the macOS leg needs both arches
+          # for the universal binary.
+          targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -47,31 +113,6 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # The committed version is the single source of truth. Read it from
-      # tauri.conf.json (the version the bundle and updater manifest actually
-      # ship), confirm package.json and Cargo.toml agree, and refuse to publish
-      # if a release for this version already exists. A forgotten bump then fails
-      # loudly here instead of silently re-shipping a stale version that
-      # installed apps would never see as an update.
-      - name: Resolve and verify release version
-        id: ver
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          PKG=$(node -p "require('./package.json').version")
-          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
-          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$CARGO" ]; then
-            echo "::error::Version mismatch — tauri.conf.json=$VERSION, package.json=$PKG, Cargo.toml=$CARGO. Set all three to the same value before merging to main."
-            exit 1
-          fi
-          if gh release view "app-v$VERSION" >/dev/null 2>&1; then
-            echo "::error::Release app-v$VERSION already exists. Bump the version in src-tauri/tauri.conf.json, package.json and src-tauri/Cargo.toml before merging to main."
-            exit 1
-          fi
-          echo "Releasing version $VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       - name: Build, sign and publish release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
@@ -79,11 +120,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: app-v${{ steps.ver.outputs.version }}
-          releaseName: TrendWave v${{ steps.ver.outputs.version }}
+          tagName: app-v${{ needs.verify.outputs.version }}
+          releaseName: TrendWave v${{ needs.verify.outputs.version }}
           releaseBody: Automated build from the latest commit on main.
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
-          # Universal binary so the release runs on both Apple Silicon and Intel Macs.
-          args: --target universal-apple-darwin
+          args: ${{ matrix.args }}
