@@ -2,10 +2,12 @@ name: ci
 
 # Build + test gate for every PR (and pushes to main) so a green check actually
 # means "the frontend type-checks and bundles, and the Rust backend compiles and
-# its tests pass." CodeQL only runs static analysis (build-mode: none), so this is
-# the workflow that catches a dependency bump or change that would otherwise break
-# the auto-publishing release on main. Runs on macos-latest to mirror release.yml,
-# so a passing run is a faithful signal that the release build will succeed.
+# its tests pass" on every OS we ship. CodeQL only runs static analysis
+# (build-mode: none), so this is the workflow that catches a dependency bump or
+# change that would otherwise break the auto-publishing release on main. Runs on
+# both macos-latest and windows-latest to mirror the platforms release.yml builds,
+# so a passing run is a faithful signal that the release build will succeed on
+# each one.
 on:
   push:
     branches: [main]
@@ -22,7 +24,13 @@ permissions: {}
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    # Don't cancel the other OS's run when one fails — a Windows-only break should
+    # still let the macOS leg report, and vice versa.
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
     permissions:
       # Only needs to read the repository contents to check it out and build.
       contents: read

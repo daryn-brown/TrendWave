@@ -1,8 +1,19 @@
 name: release
 
-# Build and publish a signed, auto-updatable macOS app every time main changes
-# (i.e. when a PR is merged). The running app checks the latest release for a
-# newer signed bundle and updates itself in place.
+# Build and publish signed, auto-updatable macOS and Windows apps every time main
+# changes (i.e. when a PR is merged). Each installed app checks the latest release
+# for a newer signed bundle for its own platform and updates itself in place. Both
+# platforms publish to the same `app-v<version>` release, and tauri-action merges
+# them into a single multi-platform `latest.json` (keyed by `darwin-*` and
+# `windows-x86_64`) that the updater reads — so Windows and macOS stay in lockstep
+# off the same version bump.
+#
+# Publishing is atomic: both platforms build into a DRAFT release first, and only
+# after latest.json describes both platforms and every bundle it points at is
+# uploaded do we flip the draft to the public "latest" release. A draft is never
+# served as "latest" and its latest.json is not published, so a half-finished or
+# single-platform upload can never break the updater for installed apps — a re-run
+# finishes the upload instead.
 on:
   push:
     branches: [main]
@@ -17,12 +28,79 @@ concurrency:
 permissions: {}
 
 jobs:
+  # Resolve and verify the version once, up front — before any platform build runs
+  # or the protected signing environment is touched. The committed version is the
+  # single source of truth: read it from tauri.conf.json (the version the bundle
+  # and updater manifest actually ship), confirm package.json and Cargo.toml agree,
+  # and refuse to publish if a release for this version already exists. A forgotten
+  # bump then fails loudly here instead of silently re-shipping a stale version
+  # that installed apps would never see as an update.
+  verify:
+    runs-on: ubuntu-latest
+    # Only needs to read repo contents and releases to resolve/verify the version.
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Don't persist the GITHUB_TOKEN in .git/config after checkout.
+          persist-credentials: false
+
+      - name: Resolve and verify release version
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(jq -r .version src-tauri/tauri.conf.json)
+          PKG=$(jq -r .version package.json)
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
+          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$CARGO" ]; then
+            echo "::error::Version mismatch — tauri.conf.json=$VERSION, package.json=$PKG, Cargo.toml=$CARGO. Set all three to the same value before merging to main."
+            exit 1
+          fi
+          # Block only when a *published* release for this version already exists —
+          # that means the version wasn't bumped. A leftover *draft* is from a
+          # previous run whose upload failed partway; the build legs below reuse it
+          # and re-upload the missing assets, so don't block.
+          DRAFT=$(gh release view "app-v$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null || echo absent)
+          if [ "$DRAFT" = "false" ]; then
+            echo "::error::Release app-v$VERSION already exists. Bump the version in src-tauri/tauri.conf.json, package.json and src-tauri/Cargo.toml before merging to main."
+            exit 1
+          elif [ "$DRAFT" = "true" ]; then
+            echo "Reusing leftover draft app-v$VERSION from a previous failed run."
+          fi
+          echo "Releasing version $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # Build, sign and stage each platform's bundle into the shared DRAFT release. The
+  # two legs run one at a time (max-parallel: 1) so they never race to update the
+  # shared latest.json: the macOS leg creates the draft and manifest, the Windows
+  # leg merges its platform entry into the existing draft.
   release:
-    runs-on: macos-latest
+    needs: verify
+    strategy:
+      # Sequential legs with macOS first: if it fails, cancel Windows rather than
+      # stage a Mac-less release — keeping the version free for a clean retry.
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: macos-latest
+            # Universal binary so the release runs on both Apple Silicon and Intel Macs.
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - platform: windows-latest
+            # NSIS-only: the recommended Windows updater installer, and it keeps the
+            # updater manifest unambiguous (no NSIS-vs-MSI choice to get wrong).
+            args: --bundles nsis
+            rust-targets: ""
+    runs-on: ${{ matrix.platform }}
     # Gate releases behind a protected `release` environment so required
     # reviewers must approve before the signing secrets are exposed.
     environment: release
-    # Only the scope this job actually needs to create the GitHub release.
+    # Only the scope this job actually needs to upload to the GitHub release.
     permissions:
       contents: write
     steps:
@@ -38,7 +116,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # Empty on Windows (host target is used); the macOS leg needs both arches
+          # for the universal binary.
+          targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -47,43 +127,11 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # The committed version is the single source of truth. Read it from
-      # tauri.conf.json (the version the bundle and updater manifest actually
-      # ship), confirm package.json and Cargo.toml agree, and refuse to publish
-      # if a release for this version already exists. A forgotten bump then fails
-      # loudly here instead of silently re-shipping a stale version that
-      # installed apps would never see as an update.
-      - name: Resolve and verify release version
-        id: ver
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          PKG=$(node -p "require('./package.json').version")
-          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/^version = "(.*)"/\1/')
-          if [ "$VERSION" != "$PKG" ] || [ "$VERSION" != "$CARGO" ]; then
-            echo "::error::Version mismatch — tauri.conf.json=$VERSION, package.json=$PKG, Cargo.toml=$CARGO. Set all three to the same value before merging to main."
-            exit 1
-          fi
-          # Block only when a *published* release for this version already
-          # exists — that means the version wasn't bumped. A leftover *draft*
-          # is from a previous run whose upload failed partway; the build step
-          # below reuses it and re-uploads the missing assets, so don't block.
-          DRAFT=$(gh release view "app-v$VERSION" --json isDraft --jq '.isDraft' 2>/dev/null || echo absent)
-          if [ "$DRAFT" = "false" ]; then
-            echo "::error::Release app-v$VERSION already exists. Bump the version in src-tauri/tauri.conf.json, package.json and src-tauri/Cargo.toml before merging to main."
-            exit 1
-          elif [ "$DRAFT" = "true" ]; then
-            echo "Reusing leftover draft app-v$VERSION from a previous failed run."
-          fi
-          echo "Releasing version $VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      # Build into a DRAFT release first. A draft is never the public "latest"
-      # release and its latest.json is not served, so a half-finished upload
-      # can't break the updater for installed apps. retryAttempts re-tries a
-      # transient build/upload failure (e.g. the undici "other side closed"
-      # socket error) that would otherwise abort the run after a single hiccup.
+      # Build into a DRAFT release. A draft is never the public "latest" release and
+      # its latest.json is not served, so a half-finished upload can't break the
+      # updater for installed apps. retryAttempts re-tries a transient build/upload
+      # failure (e.g. the undici "other side closed" socket error) that would
+      # otherwise abort the run after a single hiccup.
       - name: Build, sign and stage release (draft)
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
@@ -91,8 +139,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: app-v${{ steps.ver.outputs.version }}
-          releaseName: TrendWave v${{ steps.ver.outputs.version }}
+          tagName: app-v${{ needs.verify.outputs.version }}
+          releaseName: TrendWave v${{ needs.verify.outputs.version }}
           releaseBody: Automated build from the latest commit on main.
           releaseDraft: true
           prerelease: false
@@ -100,32 +148,60 @@ jobs:
           # Re-try a transient upload/build failure instead of leaving a
           # half-uploaded release behind.
           retryAttempts: 3
-          # Universal binary so the release runs on both Apple Silicon and Intel Macs.
-          args: --target universal-apple-darwin
+          args: ${{ matrix.args }}
 
-      # Only after every expected artifact is confirmed on the draft do we flip
-      # it to the public latest release. If anything is missing we leave it as a
-      # draft and fail, so the live updater keeps pointing at the last good
-      # release and a re-run can finish the upload.
+  # Only after both platform legs have staged their bundles do we confirm the draft
+  # is complete and flip it to the public latest release. If anything is missing we
+  # leave it as a draft and fail, so the live updater keeps pointing at the last
+  # good release and a re-run can finish the upload.
+  publish:
+    needs: [verify, release]
+    runs-on: ubuntu-latest
+    # Only needs to confirm the staged assets and publish the release; no signing
+    # secrets, so it deliberately stays out of the protected `release` environment.
+    permissions:
+      contents: write
+    steps:
       - name: Verify artifacts and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          ASSETS=$(gh release view "app-v$VERSION" --json assets --jq '[.assets[].name] | join(" ")')
+          VERSION="${{ needs.verify.outputs.version }}"
+          TAG="app-v$VERSION"
+          gh release download "$TAG" --pattern latest.json --dir manifest --clobber
+          ASSETS=$(gh release view "$TAG" --json assets --jq '[.assets[].name] | join(" ")')
           echo "Staged assets: $ASSETS"
+
+          # latest.json must describe BOTH platforms; a manifest missing either one
+          # would silently strand that platform's installed apps on their current
+          # version while the other platform updates.
+          for key in darwin windows; do
+            if [ -z "$(jq -r --arg k "$key" '.platforms | keys[] | select(startswith($k))' manifest/latest.json)" ]; then
+              echo "::error::latest.json has no $key platform entry; leaving $TAG as a draft so the live updater is unaffected. Re-run the workflow to finish the upload."
+              exit 1
+            fi
+          done
+
+          # Required assets = the known macOS outputs (the .app.tar.gz updater bundle,
+          # the .dmg manual download and its signature) plus every bundle the manifest
+          # points installed apps at — derived from latest.json so the Windows
+          # installer name can't drift from tauri's bundle naming. A missing one means
+          # a broken updater download, so stay a draft until it's there.
+          MANIFEST_BUNDLES=$(jq -r '.platforms[].url | split("/") | last' manifest/latest.json | sort -u | tr '\n' ' ')
           for required in \
-            "latest.json" \
+            latest.json \
             "TrendWave_${VERSION}_universal.dmg" \
             "TrendWave_universal.app.tar.gz" \
-            "TrendWave_universal.app.tar.gz.sig"; do
+            "TrendWave_universal.app.tar.gz.sig" \
+            $MANIFEST_BUNDLES; do
             case " $ASSETS " in
               *" $required "*) ;;
               *)
-                echo "::error::Draft app-v$VERSION is missing '$required'; leaving it as a draft so the live updater is unaffected. Re-run the workflow to finish the upload."
+                echo "::error::Draft $TAG is missing '$required'; leaving it as a draft so the live updater is unaffected. Re-run the workflow to finish the upload."
                 exit 1
                 ;;
             esac
           done
-          gh release edit "app-v$VERSION" --draft=false --latest
-          echo "Published app-v$VERSION as the latest release."
+
+          gh release edit "$TAG" --draft=false --latest
+          echo "Published $TAG as the latest release."
