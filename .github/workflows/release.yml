@@ -200,6 +200,11 @@ jobs:
       - name: Verify artifacts and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # This job has no checkout, so `gh` can't infer the repo from a git
+          # remote — that made the release API calls below fail with "fatal: not a
+          # git repository" and left the finished release stuck as a draft. Point
+          # gh at the repo explicitly instead of adding a needless full checkout.
+          GH_REPO: ${{ github.repository }}
         run: |
           VERSION="${{ needs.verify.outputs.version }}"
           TAG="app-v$VERSION"
