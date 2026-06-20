@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" alt="TrendWave logo" width="120" height="120" />
+</p>
+
 # TrendWave 📈🌊
 
 **Ask where an industry's bottlenecks are. Get the stocks best positioned to solve or monopolize them.**
@@ -9,7 +13,9 @@ monopolize them, prices them for context, scans recent news for sentiment, and h
 shortlist with the full thesis.
 
 All the reasoning runs **on your machine** through [Ollama](https://ollama.com). No API keys, no
-per-token costs, no data leaving your laptop except public price/news lookups.
+per-token costs, no data leaving your laptop except public price/news lookups. You can *optionally*
+connect a brokerage (Robinhood or Questrade) — strictly **read-only** — so picks you already own are
+flagged and you can jump straight to the right buy page.
 
 > ⚠️ **Not financial advice.** TrendWave is a research aid. Its signals are heuristic and can be
 > wrong. Verify every thesis against the linked sources before making any decision.
@@ -44,15 +50,42 @@ flowchart LR
 Progress streams live to the UI, and you can **save any search as a watchlist** to re-run with one
 click later.
 
+## Portfolio awareness & one-click Buy (optional) 🔗
+
+TrendWave is a research tool first, but it can meet you where you actually trade — always **read-only**.
+
+- **Connect a brokerage.** Link **Robinhood** (secure in-browser sign-in via OAuth 2.1 + PKCE) or
+  **Questrade** (paste a refresh token from Questrade's API centre). TrendWave only ever reads your
+  **positions and balances** — it never places, modifies, or cancels an order. Robinhood is reached
+  through its official **Agentic trading (MCP)** endpoint behind a conservative read-only tool
+  allow-list; Questrade uses its REST API (retail apps can't place trades at all).
+- **"In your portfolio" badges.** Once connected, any ranked pick you already hold — in *either*
+  broker — is flagged, and a portfolio panel shows each position's value, day change and a sparkline.
+  Ownership is context only; it never affects the ranking.
+- **Biometric lock.** Revealing a saved broker session is gated behind **Touch ID / Windows Hello**
+  (on by default). It degrades gracefully to unlocked on machines without biometric hardware.
+- **Keychain-only tokens.** Broker credentials live in your **OS keychain** (macOS Keychain, Windows
+  Credential Manager, or libsecret) — never in the database, a config file, or the repo. Disconnecting
+  deletes them.
+- **One-click Buy.** Every pick has a read-only **Buy** button that deep-links the right ticker on your
+  broker's site (Robinhood, Fidelity, Schwab, E\*TRADE, Webull, Questrade, Wealthsimple). For Canadian
+  brokers it prefers a same-security **Canadian interlisting** so you trade in CAD with no FX conversion.
+
 ## Tech stack 🛠️
 
 - **Shell:** Tauri v2 (Rust core + web frontend)
 - **Backend:** Rust — `tokio` (async pipeline), `reqwest` (HTTP), `rusqlite` (local SQLite),
-  `feed-rs` (RSS), `thiserror` (typed errors)
+  `feed-rs` (RSS), `thiserror` (typed errors), `chrono`
 - **Intelligence:** local Ollama model (default `llama3.1:8b`)
-- **Frontend:** React + TypeScript + Tailwind CSS, built with Vite
+- **Brokerage (optional, read-only):** a small built-in **MCP client** (Streamable HTTP) for
+  Robinhood's Agentic trading server and a REST client for Questrade, with `keyring` for OS-keychain
+  token storage and `robius-authentication` for Touch ID / Windows Hello. Robinhood sign-in is an
+  OAuth 2.1 PKCE flow (`sha2` / `base64` / `rand`).
+- **Frontend:** React + TypeScript + Tailwind CSS, built with Vite; light/dark theme applied before
+  first paint (no flash)
 - **Data:** free public endpoints — Yahoo Finance (prices, search, RSS news; forward P/E & analyst
-  targets) and **SEC EDGAR** (audited fundamentals). No keys required.
+  targets) and **SEC EDGAR** (audited fundamentals). No keys required. Connecting a brokerage adds
+  read-only calls to *your own* Robinhood/Questrade account only.
 
 ## Getting started 🚀
 
@@ -139,6 +172,7 @@ Open **Settings** from the sidebar to tune:
 | Max results | `8` | Cap on returned picks |
 | Scan news & sentiment | on | Pull headlines and score sentiment (slower) |
 | Research real growth | on | Pull SEC EDGAR + Yahoo fundamentals to drive the growth score (slower) |
+| Require biometric unlock | on | Gate a connected broker session behind Touch ID / Windows Hello (auto-off where unsupported) |
 
 Settings and watchlists persist in a local SQLite file (`trendwave.db`) in your OS app-data
 directory.
@@ -152,6 +186,8 @@ TrendWave/
 │   ├── App.tsx          # Orchestration + layout
 │   ├── components.tsx   # Presentational components
 │   ├── api.ts           # Typed Tauri command bridge
+│   ├── brokers.ts       # Read-only Buy routing (broker deep-links, FX-aware)
+│   ├── theme.ts         # Light/dark theme (persisted, no flash on load)
 │   ├── updater.ts       # In-app auto-update helpers
 │   └── types.ts         # Shared types (mirror of the Rust models)
 ├── src-tauri/src/       # Rust backend
@@ -161,6 +197,11 @@ TrendWave/
 │   ├── ollama.rs        # Local Ollama client
 │   ├── feeds.rs         # Free price + news feeds (Yahoo)
 │   ├── fundamentals.rs  # Real growth research (SEC EDGAR + Yahoo enrichment)
+│   ├── mcp.rs           # Minimal MCP client (Streamable HTTP transport)
+│   ├── robinhood.rs     # Read-only Robinhood Agentic (MCP) integration
+│   ├── questrade.rs     # Read-only Questrade REST integration
+│   ├── oauth.rs         # OAuth 2.1 PKCE + OS-keychain token storage
+│   ├── biometric.rs     # Touch ID / Windows Hello unlock gate
 │   ├── db.rs            # SQLite persistence
 │   ├── model.rs         # Shared serializable types
 │   ├── settings.rs      # User settings
@@ -176,3 +217,9 @@ TrendWave is local-first by design. Your prompts and results never leave your ma
 outbound network calls are to free, public endpoints — Yahoo Finance (prices & news) and SEC EDGAR
 (audited fundamentals) — and to your local Ollama server. SEC requests send a descriptive
 User-Agent with a contact address, per SEC's fair-access policy.
+
+If you connect a brokerage, TrendWave also talks to **your own** account at that broker — Robinhood
+(`agent.robinhood.com`, `api.robinhood.com`) or Questrade (`login.questrade.com`,
+`api*.iq.questrade.com`) — and nowhere else. Those connections are **read-only** (positions and
+balances), their tokens are stored in your **OS keychain** (never the database or a file), and a
+Touch ID / Windows Hello check gates a saved session by default. Disconnecting deletes the stored token.

@@ -14,6 +14,13 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-20
+
+### Changed
+- **Brand-new app icon.** A fresh TrendWave logo — a centered ripple-and-trend-arrow mark in the
+  app's sky-blue palette — now ships across the macOS and Windows app icons and the in-app favicon,
+  replacing the previous placeholder.
+
 ## [1.3.0] - 2026-06-19
 
 ### Added
@@ -29,5 +36,6 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
 - Updated frontend toolchain: React and React DOM 19.2.7, TypeScript 6.0.3, Vite 8
   and @vitejs/plugin-react 6.
 
-[Unreleased]: https://github.com/daryn-brown/TrendWave/compare/app-v1.3.0...HEAD
+[Unreleased]: https://github.com/daryn-brown/TrendWave/compare/app-v1.3.1...HEAD
+[1.3.1]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.1
 [1.3.0]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.0
