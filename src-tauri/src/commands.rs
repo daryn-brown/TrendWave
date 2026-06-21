@@ -14,6 +14,7 @@ use crate::feeds;
 use crate::model::{Listing, ListingInfo, Portfolio, ProgressEvent, ResearchResult};
 use crate::oauth;
 use crate::ollama::OllamaClient;
+use crate::onboarding::{self, OllamaStatus, SystemReport};
 use crate::questrade;
 use crate::research;
 use crate::robinhood::{self, RobinhoodClient};
@@ -99,6 +100,49 @@ pub async fn get_settings(state: State<'_, AppState>) -> AppResult<Settings> {
 pub async fn save_settings(state: State<'_, AppState>, settings: Settings) -> AppResult<()> {
     let conn = state.lock_db()?;
     db::save_settings(&conn, &settings)
+}
+
+// --- First-run setup (onboarding) -------------------------------------------
+
+/// Whether the first-run setup wizard has been completed. False on a fresh
+/// install (and the frontend then shows onboarding); existing installs are
+/// migrated to `true` at launch so upgraders never see it.
+#[tauri::command]
+pub async fn onboarding_status(state: State<'_, AppState>) -> AppResult<bool> {
+    let conn = state.lock_db()?;
+    db::get_flag(&conn, db::FLAG_ONBOARDED)
+}
+
+/// Finish setup: persist the model the user chose (when provided) and mark
+/// onboarding done so the wizard does not show again.
+#[tauri::command]
+pub async fn complete_onboarding(state: State<'_, AppState>, model: String) -> AppResult<()> {
+    let conn = state.lock_db()?;
+    let mut settings = db::load_settings(&conn)?;
+    let model = model.trim();
+    if !model.is_empty() {
+        settings.model = model.to_string();
+    }
+    db::save_settings(&conn, &settings)?;
+    db::set_flag(&conn, db::FLAG_ONBOARDED, true)
+}
+
+/// Detected machine specs plus the model shortlist (with the best-fit pick
+/// flagged) for the "set up local AI" step.
+#[tauri::command]
+pub async fn system_report() -> AppResult<SystemReport> {
+    Ok(onboarding::system_report())
+}
+
+/// Whether Ollama is installed / running and which models are already pulled, so
+/// setup can guide the user to install it or pick an existing model.
+#[tauri::command]
+pub async fn ollama_status(state: State<'_, AppState>) -> AppResult<OllamaStatus> {
+    let endpoint = {
+        let conn = state.lock_db()?;
+        db::load_settings(&conn)?.ollama_endpoint
+    };
+    Ok(onboarding::ollama_status(&state.http, &endpoint).await)
 }
 
 #[tauri::command]
