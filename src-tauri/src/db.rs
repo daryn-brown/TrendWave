@@ -63,6 +63,15 @@ pub fn save_settings(conn: &Connection, settings: &Settings) -> AppResult<()> {
     Ok(())
 }
 
+/// Whether a settings row has ever been written. Used at launch to tell a fresh
+/// install (no row yet) apart from an upgrade, so only true newcomers see the
+/// first-run setup wizard.
+pub fn settings_exists(conn: &Connection) -> AppResult<bool> {
+    let mut stmt = conn.prepare("SELECT 1 FROM settings WHERE id = 1")?;
+    let mut rows = stmt.query([])?;
+    Ok(rows.next()?.is_some())
+}
+
 /// Non-secret app flags live in their own tiny KV table so launch-time code can
 /// answer questions like "is a broker connected?" without touching the OS
 /// keychain — reading a stored credential pops a system password prompt, and we
@@ -71,6 +80,12 @@ pub const FLAG_ROBINHOOD_CONNECTED: &str = "robinhood_connected";
 pub const FLAG_QUESTRADE_CONNECTED: &str = "questrade_connected";
 pub const FLAG_BIO_DEFAULT_MIGRATED: &str = "bio_default_migrated";
 pub const FLAG_MARKERS_BACKFILLED: &str = "markers_backfilled";
+/// Set once the first-run setup wizard has been completed (or skipped for an
+/// existing install). When false on launch, the frontend shows onboarding.
+pub const FLAG_ONBOARDED: &str = "onboarding_complete";
+/// Guards the one-time check that decides whether an upgrading install should
+/// skip onboarding, so it is evaluated exactly once.
+pub const FLAG_ONBOARDING_MIGRATED: &str = "onboarding_migrated";
 
 /// Read a boolean flag; absent keys read as `false`.
 pub fn get_flag(conn: &Connection, key: &str) -> AppResult<bool> {

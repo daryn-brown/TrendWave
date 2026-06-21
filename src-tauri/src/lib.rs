@@ -8,6 +8,7 @@ mod mcp;
 mod model;
 mod oauth;
 mod ollama;
+mod onboarding;
 mod questrade;
 mod research;
 mod robinhood;
