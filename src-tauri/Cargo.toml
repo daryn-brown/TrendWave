@@ -43,3 +43,8 @@ robius-authentication = "0.1.1"
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+# Read total physical RAM during first-run onboarding so we can recommend a
+# local model that fits the machine. Only the `system` feature is enabled to
+# keep the dependency (and compile time) small. Pinned below 0.39, which raised
+# its MSRV beyond this toolchain; the memory API used here is unchanged.
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }

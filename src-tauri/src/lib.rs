@@ -8,6 +8,7 @@ mod mcp;
 mod model;
 mod oauth;
 mod ollama;
+mod onboarding;
 mod questrade;
 mod research;
 mod robinhood;
@@ -33,6 +34,24 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let conn = rusqlite::Connection::open(data_dir.join("trendwave.db"))?;
             db::init(&conn)?;
+
+            // One-time decision (evaluated before any code below writes a settings
+            // row): only brand-new installs should see the first-run setup wizard.
+            // An install that already has settings, a watchlist, a connected broker,
+            // or any prior migration flag is an upgrade — mark it onboarded so the
+            // wizard never appears for existing users.
+            if !db::get_flag(&conn, db::FLAG_ONBOARDING_MIGRATED)? {
+                let existing_install = db::settings_exists(&conn)?
+                    || !db::list_watchlists(&conn)?.is_empty()
+                    || db::get_flag(&conn, db::FLAG_ROBINHOOD_CONNECTED)?
+                    || db::get_flag(&conn, db::FLAG_QUESTRADE_CONNECTED)?
+                    || db::get_flag(&conn, db::FLAG_BIO_DEFAULT_MIGRATED)?
+                    || db::get_flag(&conn, db::FLAG_MARKERS_BACKFILLED)?;
+                if existing_install {
+                    db::set_flag(&conn, db::FLAG_ONBOARDED, true)?;
+                }
+                db::set_flag(&conn, db::FLAG_ONBOARDING_MIGRATED, true)?;
+            }
 
             // One-time migration: default the biometric gate ON for existing
             // installs (fresh installs already default it on). Tracked by a flag
@@ -92,6 +111,10 @@ pub fn run() {
             commands::run_watchlist,
             commands::get_settings,
             commands::save_settings,
+            commands::onboarding_status,
+            commands::complete_onboarding,
+            commands::system_report,
+            commands::ollama_status,
             commands::list_watchlists,
             commands::create_watchlist,
             commands::delete_watchlist,

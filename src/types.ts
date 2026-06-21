@@ -145,3 +145,35 @@ export interface AppErrorShape {
   kind: string;
   message: string;
 }
+
+// --- First-run setup / onboarding (mirrors src-tauri/src/onboarding.rs) -----
+
+export interface SystemSpecs {
+  os: string; // "macos" | "windows" | "linux" | …
+  arch: string; // e.g. "aarch64", "x86_64"
+  total_ram_gb: number;
+  cpu_cores: number;
+}
+
+export interface ModelOption {
+  id: string; // Ollama model id, e.g. "llama3.1:8b"
+  label: string;
+  params: string; // e.g. "8B"
+  min_ram_gb: number;
+  download_gb: number;
+  blurb: string;
+  can_run: boolean; // detected RAM clears this model's comfortable minimum
+  recommended: boolean; // best fit for this machine (exactly one)
+}
+
+export interface SystemReport {
+  specs: SystemSpecs;
+  options: ModelOption[];
+  recommended_id: string;
+}
+
+export interface OllamaStatus {
+  installed: boolean; // binary/app present on disk (even if not started)
+  running: boolean; // local server answered
+  models: string[]; // already-pulled model ids
+}

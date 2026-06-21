@@ -2,12 +2,14 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   Listing,
   ListingInfo,
+  OllamaStatus,
   Portfolio,
   ProgressEvent,
   QuestradeStatus,
   ResearchResult,
   RobinhoodStatus,
   Settings,
+  SystemReport,
   Watchlist,
 } from "./types";
 
@@ -35,6 +37,21 @@ export const getSettings = () => invoke<Settings>("get_settings");
 
 export const saveSettings = (settings: Settings) =>
   invoke<void>("save_settings", { settings });
+
+// --- First-run setup (onboarding) ------------------------------------------
+
+// Whether the setup wizard has run. False only on a fresh install.
+export const onboardingStatus = () => invoke<boolean>("onboarding_status");
+
+// Persist the chosen model and mark setup complete.
+export const completeOnboarding = (model: string) =>
+  invoke<void>("complete_onboarding", { model });
+
+// Machine specs + the model shortlist (best fit flagged) for the setup wizard.
+export const systemReport = () => invoke<SystemReport>("system_report");
+
+// Whether Ollama is installed / running and which models are pulled.
+export const ollamaStatus = () => invoke<OllamaStatus>("ollama_status");
 
 export const listWatchlists = () => invoke<Watchlist[]>("list_watchlists");
 
