@@ -1,7 +1,7 @@
 {
   "name": "trendwave",
   "private": true,
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "A background-first Tauri desktop app for detecting early stock momentum.",
   "type": "module",
   "scripts": {
