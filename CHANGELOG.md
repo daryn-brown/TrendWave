@@ -14,6 +14,17 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-06-21
+
+### Added
+- **First-run setup flow.** New installs now open a short guided setup before the
+  app: review and agree to the terms, then get help getting a local AI model
+  running. TrendWave detects whether Ollama is installed, reads your computer's
+  memory and CPU, and recommends a model that fits your machine — with a one-click
+  link to install Ollama and other model options to pick from — then finishes with
+  a brief tour of how the app works. Existing installs are detected automatically
+  and skip setup entirely.
+
 ## [1.3.1] - 2026-06-20
 
 ### Changed
@@ -36,6 +47,7 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
 - Updated frontend toolchain: React and React DOM 19.2.7, TypeScript 6.0.3, Vite 8
   and @vitejs/plugin-react 6.
 
-[Unreleased]: https://github.com/daryn-brown/TrendWave/compare/app-v1.3.1...HEAD
+[Unreleased]: https://github.com/daryn-brown/TrendWave/compare/app-v1.3.2...HEAD
+[1.3.2]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.2
 [1.3.1]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.1
 [1.3.0]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.0
