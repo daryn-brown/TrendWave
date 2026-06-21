@@ -33,6 +33,7 @@ import type {
 } from "./types";
 import { checkForUpdate, downloadAndInstall, relaunch, Update } from "./updater";
 import { useTheme } from "./theme";
+import Onboarding from "./onboarding";
 
 const EXAMPLES = [
   "Where are the bottlenecks in the AI data-center buildout?",
@@ -68,9 +69,16 @@ export default function App() {
   const [updateProgress, setUpdateProgress] = useState(0);
   const [updateToast, setUpdateToast] = useState<string | null>(null);
 
+  // null = not yet known (avoid flashing the app before we know); false shows
+  // the first-run setup wizard; true renders the app normally.
+  const [onboarded, setOnboarded] = useState<boolean | null>(null);
+
   const { theme, toggle: toggleTheme } = useTheme();
 
   useEffect(() => {
+    // Decide first-run vs. returning user before anything paints; on error,
+    // fail open to the app so a detection hiccup never locks the user out.
+    api.onboardingStatus().then(setOnboarded).catch(() => setOnboarded(true));
     api.getSettings().then(setSettings).catch(() => {});
     refreshWatchlists();
     api.biometricAvailable().then(setBioAvailable).catch(() => {});
@@ -207,6 +215,15 @@ export default function App() {
     await api.saveSettings(s).catch(() => {});
     setSettings(s);
     setShowSettings(false);
+  };
+
+  // Persist the chosen model + mark setup done, then reload settings so the app
+  // immediately reflects the model picked during onboarding.
+  const handleCompleteOnboarding = async (model: string) => {
+    await api.completeOnboarding(model).catch(() => {});
+    const saved = await api.getSettings().catch(() => null);
+    if (saved) setSettings(saved);
+    setOnboarded(true);
   };
 
   const handleConnectRobinhood = async () => {
@@ -380,6 +397,16 @@ export default function App() {
         />
       ),
     });
+  }
+
+  // Hold the app until we know onboarding state; show the wizard for new users.
+  if (onboarded === null) {
+    return (
+      <div className="h-full bg-[radial-gradient(circle_at_top,_#eff6ff,_#f8fafc_60%)] dark:bg-[radial-gradient(circle_at_top,_#0b1220,_#020617_60%)]" />
+    );
+  }
+  if (!onboarded) {
+    return <Onboarding onComplete={handleCompleteOnboarding} />;
   }
 
   return (
