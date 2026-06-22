@@ -4,14 +4,17 @@ mod db;
 mod error;
 mod feeds;
 mod fundamentals;
+mod inflection;
 mod mcp;
 mod model;
 mod oauth;
 mod ollama;
 mod onboarding;
+mod providers;
 mod questrade;
 mod research;
 mod robinhood;
+mod scoring;
 mod settings;
 
 use std::sync::Mutex;
@@ -131,6 +134,9 @@ pub fn run() {
             commands::resolve_listings,
             commands::robinhood_symbol_available,
             commands::questrade_find_listing,
+            commands::data_provider_status,
+            commands::data_provider_set_key,
+            commands::data_provider_clear_key,
         ])
         .run(tauri::generate_context!());
 

@@ -35,6 +35,22 @@ export interface NewsItem {
   sentiment?: number | null;
 }
 
+// Per-term weighted contributions behind a candidate's score (mirrors
+// src-tauri/src/scoring.rs SignalBreakdown). Lets the UI explain the ranking.
+export interface SignalBreakdown {
+  severity: number;
+  moat: number;
+  growth: number;
+  sentiment: number;
+  momentum: number;
+  inflection: number;
+  technical: number;
+  revisions: number;
+  insider: number;
+  filing: number;
+  total: number;
+}
+
 export interface Candidate {
   ticker: string;
   company: string;
@@ -51,6 +67,9 @@ export interface Candidate {
   sentiment?: number | null;
   news: NewsItem[];
   score: number;
+  breakdown?: SignalBreakdown | null; // per-term contributions behind `score`
+  timing?: string | null; // cycle-timing label (Early/Building/Extended/Late)
+  discovery?: string | null; // how the pick was surfaced (model/screener/both)
   owned?: boolean; // held in a connected brokerage account (read-only context)
 }
 
@@ -122,13 +141,33 @@ export type ProgressEvent =
   | { type: "done"; result: ResearchResult }
   | { type: "failed"; kind: string; message: string };
 
+// Scoring profile (mirrors src-tauri/src/scoring.rs ScoringMode). `legacy`
+// reproduces the original five-term formula; `early_detection` weights the
+// forward/inflection signals.
+export type ScoringMode = "legacy" | "early_detection";
+
+// Market-data provider (mirrors src-tauri/src/providers.rs ProviderKind).
+// `free` uses only SEC EDGAR + Yahoo and needs no key; paid modes use a
+// bring-your-own-key source stored in the OS keychain.
+export type ProviderKind = "free" | "fmp";
+
 export interface Settings {
   ollama_endpoint: string;
   model: string;
   max_results: number;
   use_news: boolean;
   use_fundamentals: boolean;
+  scoring_mode: ScoringMode;
+  data_provider: ProviderKind;
   require_biometric_unlock: boolean;
+}
+
+// Status of the optional paid data provider (mirrors commands::DataProviderStatus).
+// `has_key` reflects whether an API key is stored, read from a flag so opening
+// Settings never triggers a keychain password prompt.
+export interface DataProviderStatus {
+  provider: ProviderKind;
+  has_key: boolean;
 }
 
 export interface Watchlist {

@@ -15,6 +15,7 @@ use crate::model::{Listing, ListingInfo, Portfolio, ProgressEvent, ResearchResul
 use crate::oauth;
 use crate::ollama::OllamaClient;
 use crate::onboarding::{self, OllamaStatus, SystemReport};
+use crate::providers::{self, ProviderKind};
 use crate::questrade;
 use crate::research;
 use crate::robinhood::{self, RobinhoodClient};
@@ -421,6 +422,43 @@ pub async fn questrade_find_listing(
         async move { client.find_listing(&symbol).await }
     })
     .await
+}
+
+// --- Optional paid data provider --------------------------------------------
+
+/// The selected market-data provider plus whether a paid API key is currently
+/// stored. `has_key` is read from a non-secret flag (not the keychain) so
+/// opening Settings never triggers a system password prompt.
+#[derive(serde::Serialize)]
+pub struct DataProviderStatus {
+    pub provider: ProviderKind,
+    pub has_key: bool,
+}
+
+#[tauri::command]
+pub async fn data_provider_status(state: State<'_, AppState>) -> AppResult<DataProviderStatus> {
+    let conn = state.lock_db()?;
+    Ok(DataProviderStatus {
+        provider: db::load_settings(&conn)?.data_provider,
+        has_key: db::get_flag(&conn, db::FLAG_DATA_PROVIDER_KEY_SET)?,
+    })
+}
+
+/// Store a paid-provider API key in the OS keychain and record that one is set.
+/// The key itself never touches SQLite, settings JSON, or logs.
+#[tauri::command]
+pub async fn data_provider_set_key(state: State<'_, AppState>, key: String) -> AppResult<()> {
+    providers::save_key(&key)?;
+    let conn = state.lock_db()?;
+    db::set_flag(&conn, db::FLAG_DATA_PROVIDER_KEY_SET, true)
+}
+
+/// Remove the stored paid-provider API key and clear the "key set" flag.
+#[tauri::command]
+pub async fn data_provider_clear_key(state: State<'_, AppState>) -> AppResult<()> {
+    providers::clear_key()?;
+    let conn = state.lock_db()?;
+    db::set_flag(&conn, db::FLAG_DATA_PROVIDER_KEY_SET, false)
 }
 
 /// Shared body for both the ad-hoc prompt and watchlist re-runs: load settings,

@@ -1,5 +1,6 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
+  DataProviderStatus,
   Listing,
   ListingInfo,
   OllamaStatus,
@@ -37,6 +38,20 @@ export const getSettings = () => invoke<Settings>("get_settings");
 
 export const saveSettings = (settings: Settings) =>
   invoke<void>("save_settings", { settings });
+
+// --- Optional paid data provider -------------------------------------------
+
+// Selected provider + whether a paid key is stored (flag-backed, no keychain prompt).
+export const dataProviderStatus = () =>
+  invoke<DataProviderStatus>("data_provider_status");
+
+// Store a paid-provider API key in the OS keychain.
+export const dataProviderSetKey = (key: string) =>
+  invoke<void>("data_provider_set_key", { key });
+
+// Remove the stored paid-provider API key.
+export const dataProviderClearKey = () =>
+  invoke<void>("data_provider_clear_key");
 
 // --- First-run setup (onboarding) ------------------------------------------
 
