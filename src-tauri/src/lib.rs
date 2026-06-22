@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod backtest;
 mod biometric;
 mod changes;
 mod commands;
