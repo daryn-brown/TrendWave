@@ -80,6 +80,10 @@ pub const FLAG_ROBINHOOD_CONNECTED: &str = "robinhood_connected";
 pub const FLAG_QUESTRADE_CONNECTED: &str = "questrade_connected";
 pub const FLAG_BIO_DEFAULT_MIGRATED: &str = "bio_default_migrated";
 pub const FLAG_MARKERS_BACKFILLED: &str = "markers_backfilled";
+/// Set whenever a paid data-provider API key is stored in the OS keychain.
+/// Mirrors key presence in this non-secret table so the Settings UI can show
+/// "key set" without a keychain read (which would pop a system password prompt).
+pub const FLAG_DATA_PROVIDER_KEY_SET: &str = "data_provider_key_set";
 /// Set once the first-run setup wizard has been completed (or skipped for an
 /// existing install). When false on launch, the frontend shows onboarding.
 pub const FLAG_ONBOARDED: &str = "onboarding_complete";

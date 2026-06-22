@@ -4,12 +4,19 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+use crate::changes::diff_runs;
 use crate::error::AppResult;
 use crate::feeds;
+use crate::filings;
 use crate::fundamentals::{self, YahooEnrich};
+use crate::inflection;
 use crate::model::{Bottleneck, Candidate, ProgressEvent, ResearchResult, DISCLAIMER};
 use crate::ollama::OllamaClient;
+use crate::providers::DataProvider;
+use crate::scoring::{self, ScoringMode, ScoringWeights, SignalBreakdown, Signals};
+use crate::screener;
 use crate::settings::Settings;
+use crate::technical;
 
 const SYSTEM_BOTTLENECK: &str = "\
 You are a sharp equity research analyst who specializes in SUPPLY-CHAIN and CAPACITY \
@@ -33,15 +40,16 @@ const SYSTEM_SENTIMENT: &str = "\
 You judge market sentiment from news headlines about one company. Respond with STRICT JSON \
 only: {\"score\":number} where score is between -1 (very bearish) and 1 (very bullish).";
 
-// Scoring weights — positioning to win the bottleneck (severity + moat) and
-// real growth potential dominate; sentiment and momentum only refine. Growth is
-// the single largest factor and comes from audited data, not the model's guess.
-// Share price is never scored.
-const W_BOTTLENECK: f64 = 25.0;
-const W_MOAT: f64 = 25.0;
-const W_GROWTH: f64 = 35.0;
-const W_SENTIMENT: f64 = 10.0;
-const W_MOMENTUM: f64 = 5.0;
+/// Upper bound on candidates the Phase 2 screener may add to a single run, so a
+/// broad discovery net can't balloon the downstream pricing/fundamentals/news
+/// fan-out. Discovered names still compete on score and are trimmed to
+/// `max_results` like everything else.
+const MAX_DISCOVERED: usize = 10;
+
+// Scoring weights and the composite formula now live in `crate::scoring`
+// (`ScoringWeights` presets + `composite_score`). `score_candidate` below
+// delegates to them with the legacy preset so existing callers and tests keep
+// their exact behavior, while the pipeline can rank with any `ScoringMode`.
 
 #[derive(Deserialize)]
 struct BottleneckPlan {
@@ -108,30 +116,66 @@ struct SentimentOut {
 struct Working {
     candidate: Candidate,
     severity: u8,
+    /// Early-detection signals computed in `EarlyDetection` mode (best-effort,
+    /// `None` when unavailable or in `Legacy` mode → scored neutral).
+    inflection: Option<f64>,
+    revisions: Option<f64>,
+    technical: Option<f64>,
+    insider: Option<f64>,
+    filing: Option<f64>,
 }
 
-/// Pure, deterministic scoring so it can be unit-tested without any network.
-/// Positioning to win the bottleneck (severity + moat) and real growth dominate;
-/// sentiment and momentum refine. `growth` is a 0..1 data-derived score (see
-/// `fundamentals::growth_score`). Share price is deliberately NOT a factor.
-pub fn score_candidate(
+/// One candidate's early-detection signals, produced concurrently and applied
+/// back to `working[idx]` after the enrichment join.
+struct Enrichment {
+    idx: usize,
+    inflection: Option<f64>,
+    revisions: Option<f64>,
+    technical: Option<technical::Technical>,
+    insider: Option<f64>,
+    filing: Option<f64>,
+}
+
+/// Legacy positional scorer used by the equivalence/monotonicity test-suite.
+///
+/// Production code scores through `scoring::composite_score` directly (to also
+/// capture the per-term breakdown and honor the user's `ScoringMode`); this thin
+/// wrapper reproduces the original five-term formula with the **legacy** weights
+/// so the tests below can assert that behavior with a compact call. Test-only.
+#[cfg(test)]
+fn score_candidate(
     severity: u8,
     moat: u8,
     growth: f64,
     sentiment: Option<f64>,
     change_pct: f64,
 ) -> f64 {
-    let sev = (severity.clamp(1, 5) as f64) / 5.0;
-    let moat_n = (moat.clamp(1, 5) as f64) / 5.0;
-    let growth_n = growth.clamp(0.0, 1.0);
+    let signals = Signals {
+        severity,
+        moat,
+        growth,
+        sentiment,
+        change_pct,
+        ..Default::default()
+    };
+    scoring::composite_score(&ScoringWeights::legacy(), &signals).total
+}
 
-    // Map -1..1 sentiment onto 0..1; unknown sentiment sits neutral.
-    let senti = ((sentiment.unwrap_or(0.0).clamp(-1.0, 1.0)) + 1.0) / 2.0;
-
-    // +20% over the window → full marks, -20% → zero, clamped.
-    let momentum = (0.5 + change_pct / 40.0).clamp(0.0, 1.0);
-
-    W_BOTTLENECK * sev + W_MOAT * moat_n + W_GROWTH * growth_n + W_SENTIMENT * senti + W_MOMENTUM * momentum
+/// Scale every contribution in a breakdown by `factor`, keeping `total` equal to
+/// the sum of its (now scaled) parts. Used to apply the identity-mismatch penalty
+/// to the whole breakdown so the displayed contributions still add up to `score`.
+fn scale_breakdown(b: &mut SignalBreakdown, factor: f64) {
+    b.severity *= factor;
+    b.moat *= factor;
+    b.growth *= factor;
+    b.sentiment *= factor;
+    b.momentum *= factor;
+    b.inflection *= factor;
+    b.technical *= factor;
+    b.revisions *= factor;
+    b.insider *= factor;
+    b.filing *= factor;
+    b.total *= factor;
 }
 
 /// Multiplicative penalty applied when a candidate's ticker resolves to a
@@ -143,14 +187,6 @@ pub fn score_candidate(
 /// which trips the check, so we keep the pick visible (with its warning) rather
 /// than risk burying a legitimate one.
 const IDENTITY_MISMATCH_PENALTY: f64 = 0.5;
-
-fn penalize_for_identity(base: f64, mismatch: bool) -> f64 {
-    if mismatch {
-        base * IDENTITY_MISMATCH_PENALTY
-    } else {
-        base
-    }
-}
 
 fn normalize_ticker(raw: &str) -> String {
     raw.trim()
@@ -199,6 +235,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     settings: &Settings,
     prompt: &str,
     owned: &BTreeSet<String>,
+    previous: Option<&ResearchResult>,
     emit: &F,
 ) -> AppResult<ResearchResult> {
     emit(ProgressEvent::Stage {
@@ -260,6 +297,11 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             seen.push(key);
             working.push(Working {
                 severity,
+                inflection: None,
+                revisions: None,
+                technical: None,
+                insider: None,
+                filing: None,
                 candidate: Candidate {
                     ticker,
                     company: c.company.clone(),
@@ -276,6 +318,90 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                     sentiment: None,
                     news: Vec::new(),
                     score: 0.0,
+                    breakdown: None,
+                    timing: None,
+                    discovery: None,
+                    owned: false,
+                },
+            });
+        }
+    }
+
+    // Candidate discovery (Phase 2): in EarlyDetection mode, augment the model's
+    // picks with names surfaced from free live sources — SEC EDGAR full-text
+    // search on each bottleneck's own vocabulary plus Yahoo market screeners.
+    // This breaks the model's training-cutoff ceiling: an EDGAR search for "NAND"
+    // surfaces Micron / Western Digital on-thesis, and a momentum screener
+    // surfaces post-cutoff relistings (e.g. SanDisk) the model has never heard
+    // of. Gated on EarlyDetection so Legacy stays byte-identical and skips the
+    // extra network calls entirely.
+    if settings.scoring_mode == ScoringMode::EarlyDetection {
+        emit(ProgressEvent::Stage {
+            stage: "discovery".into(),
+            message: "Discovering candidates the prompt didn't name…".into(),
+        });
+        let inputs: Vec<(String, String)> = bottlenecks
+            .iter()
+            .map(|b| (b.title.clone(), b.description.clone()))
+            .collect();
+        let severities: std::collections::HashMap<String, u8> =
+            bottlenecks.iter().map(|b| (b.title.clone(), b.severity)).collect();
+        let discovered = screener::discover(http, &inputs, MAX_DISCOVERED).await;
+
+        // Tag provenance: any model-named pick the screener also surfaced is
+        // independently corroborated ("both"); the rest are "model".
+        let corroborated: BTreeSet<String> = discovered
+            .iter()
+            .map(|d| d.ticker.to_ascii_uppercase())
+            .collect();
+        for w in working.iter_mut() {
+            let both = corroborated.contains(&w.candidate.ticker.to_ascii_uppercase());
+            w.candidate.discovery = Some(if both { "both" } else { "model" }.into());
+        }
+
+        // Admit only genuinely new tickers — the model still owns the thesis for
+        // anything it named.
+        for d in discovered {
+            let key = d.ticker.to_ascii_lowercase();
+            if key.is_empty() || seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            let severity = severities.get(&d.bottleneck).copied().unwrap_or(3);
+            let thesis = if d.source == screener::SRC_EDGAR {
+                format!(
+                    "Surfaced by SEC EDGAR full-text search for “{}” — recent filings discuss this bottleneck.",
+                    d.context
+                )
+            } else {
+                format!("Surfaced by the Yahoo “{}” screener.", d.context)
+            };
+            working.push(Working {
+                severity,
+                inflection: None,
+                revisions: None,
+                technical: None,
+                insider: None,
+                filing: None,
+                candidate: Candidate {
+                    ticker: d.ticker,
+                    company: d.company,
+                    verified_name: None,
+                    identity_mismatch: false,
+                    price: None,
+                    bottleneck: d.bottleneck,
+                    thesis,
+                    moat: 3,
+                    upside: 3,
+                    upside_rationale: String::new(),
+                    growth: None,
+                    growth_score: 0.0,
+                    sentiment: None,
+                    news: Vec::new(),
+                    score: 0.0,
+                    breakdown: None,
+                    timing: None,
+                    discovery: Some(d.source.into()),
                     owned: false,
                 },
             });
@@ -385,11 +511,82 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         }
     }
 
+    // Early-detection enrichment: quarterly **inflection** (free SEC EDGAR),
+    // **estimate revisions** (paid provider when active, else free Yahoo analyst
+    // recommendations), and **technical / cycle-timing** (Yahoo chart vs. an SPY
+    // benchmark). Gated on `EarlyDetection` so `Legacy` stays byte-identical and
+    // skips these extra network round-trips entirely.
+    if settings.scoring_mode == ScoringMode::EarlyDetection {
+        let provider = DataProvider::resolve(settings.data_provider);
+        let message = if provider.is_active() {
+            format!(
+                "Detecting inflection, revisions & timing (revisions via {})…",
+                provider.kind.label()
+            )
+        } else {
+            "Detecting inflection, revisions & timing…".into()
+        };
+        emit(ProgressEvent::Stage {
+            stage: "inflection".into(),
+            message,
+        });
+        let yahoo = YahooEnrich::init().await;
+        let benchmark = Arc::new(technical::fetch_benchmark(http).await);
+        let limit = Arc::new(Semaphore::new(4));
+        let mut set = tokio::task::JoinSet::new();
+        for (idx, w) in working.iter().enumerate() {
+            let http = http.clone();
+            let ticker = w.candidate.ticker.clone();
+            let yahoo = yahoo.clone();
+            let provider = provider.clone();
+            let benchmark = benchmark.clone();
+            let limit = limit.clone();
+            set.spawn(async move {
+                let _permit = limit.acquire_owned().await.ok();
+                let inflection = inflection::fetch_inflection(&http, &ticker).await;
+                // Paid revisions first; degrade to the free Yahoo path on any miss.
+                let revisions = match provider.estimate_revisions(&http, &ticker).await {
+                    Some(rev) => Some(rev),
+                    None => match yahoo.as_ref() {
+                        Some(y) => y.fetch_recommendations(&ticker).await,
+                        None => None,
+                    },
+                };
+                let technical = technical::fetch_technical(&http, &ticker, &benchmark).await;
+                // Free SEC forward tells: insider open-market buying (Form 4) and
+                // capacity/pricing-power language in recent 8-Ks.
+                let filings::FilingSignals { insider, filing } =
+                    filings::fetch_signals(&http, &ticker).await;
+                Enrichment {
+                    idx,
+                    inflection,
+                    revisions: revisions.map(|r| r.score()),
+                    technical,
+                    insider,
+                    filing,
+                }
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            if let Ok(e) = joined {
+                working[e.idx].inflection = e.inflection;
+                working[e.idx].revisions = e.revisions;
+                working[e.idx].insider = e.insider;
+                working[e.idx].filing = e.filing;
+                if let Some(t) = e.technical {
+                    working[e.idx].technical = Some(t.score);
+                    working[e.idx].candidate.timing = Some(t.timing.as_str().to_string());
+                }
+            }
+        }
+    }
+
     // Score, rank, trim.
     emit(ProgressEvent::Stage {
         stage: "ranking".into(),
         message: "Ranking by growth & positioning…".into(),
     });
+    let weights = ScoringWeights::for_mode(settings.scoring_mode);
     for w in working.iter_mut() {
         // Real fundamentals drive the growth term; fall back to the model's
         // upside only when the user has turned fundamentals off.
@@ -403,14 +600,28 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             (w.candidate.upside.clamp(1, 5) as f64) / 5.0
         };
         w.candidate.growth_score = growth;
-        let base = score_candidate(
-            w.severity,
-            w.candidate.moat,
+        // Early-detection signals (inflection, revisions, technical, insider,
+        // filing) are populated above in `EarlyDetection` mode and sit `None`
+        // (scored neutral) in `Legacy` mode, so this still reduces to the legacy
+        // formula exactly under legacy weights.
+        let signals = Signals {
+            severity: w.severity,
+            moat: w.candidate.moat,
             growth,
-            w.candidate.sentiment,
-            w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
-        );
-        w.candidate.score = penalize_for_identity(base, w.candidate.identity_mismatch);
+            sentiment: w.candidate.sentiment,
+            change_pct: w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
+            inflection: w.inflection,
+            revisions: w.revisions,
+            technical: w.technical,
+            insider: w.insider,
+            filing: w.filing,
+        };
+        let mut breakdown = scoring::composite_score(&weights, &signals);
+        if w.candidate.identity_mismatch {
+            scale_breakdown(&mut breakdown, IDENTITY_MISMATCH_PENALTY);
+        }
+        w.candidate.score = breakdown.total;
+        w.candidate.breakdown = Some(breakdown);
         w.candidate.owned = owned.contains(&w.candidate.ticker.to_ascii_uppercase());
     }
     working.sort_by(|a, b| {
@@ -430,12 +641,22 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         candidates.push(w.candidate);
     }
 
+    // Diff against the previous run of the same saved query (if any), so the UI
+    // can show "what changed" without any background monitoring.
+    let changes = previous.map(|p| diff_runs(&p.candidates, &candidates));
+    if let Some(ch) = &changes {
+        if !ch.is_empty() {
+            emit(ProgressEvent::Changes { changes: ch.clone() });
+        }
+    }
+
     let result = ResearchResult {
         industry,
         summary,
         bottlenecks,
         candidates,
         disclaimer: DISCLAIMER.to_string(),
+        changes,
     };
     emit(ProgressEvent::Done {
         result: result.clone(),
@@ -534,13 +755,27 @@ mod tests {
 
     #[test]
     fn identity_mismatch_demotes_but_never_zeroes() {
-        let base = score_candidate(5, 5, 0.8, Some(0.5), 10.0);
-        let penalized = penalize_for_identity(base, true);
-        assert!(penalized < base, "a mismatch must lower the score");
-        assert!(penalized > 0.0, "a mismatch must not zero a pick out");
-        assert_eq!(penalized, base * IDENTITY_MISMATCH_PENALTY);
-        // A clean candidate is untouched.
-        assert_eq!(penalize_for_identity(base, false), base);
+        let signals = Signals {
+            severity: 5,
+            moat: 5,
+            growth: 0.8,
+            sentiment: Some(0.5),
+            change_pct: 10.0,
+            ..Default::default()
+        };
+        let full = scoring::composite_score(&ScoringWeights::legacy(), &signals);
+        let mut demoted = full.clone();
+        scale_breakdown(&mut demoted, IDENTITY_MISMATCH_PENALTY);
+        assert!(demoted.total < full.total, "a mismatch must lower the score");
+        assert!(demoted.total > 0.0, "a mismatch must not zero a pick out");
+        assert!((demoted.total - full.total * IDENTITY_MISMATCH_PENALTY).abs() < 1e-9);
+        // Scaling keeps the breakdown internally consistent: parts still sum to total.
+        let sum = demoted.severity
+            + demoted.moat
+            + demoted.growth
+            + demoted.sentiment
+            + demoted.momentum;
+        assert!((sum - demoted.total).abs() < 1e-9);
     }
 
     #[test]

@@ -12,8 +12,9 @@ identifies the real supply-chain chokepoints, finds the public companies best po
 monopolize them, prices them for context, scans recent news for sentiment, and hands back a ranked
 shortlist with the full thesis.
 
-All the reasoning runs **on your machine** through [Ollama](https://ollama.com). No API keys, no
-per-token costs, no data leaving your laptop except public price/news lookups. You can *optionally*
+All the reasoning runs **on your machine** through [Ollama](https://ollama.com). No API keys
+required, no per-token costs, no data leaving your laptop except public price/news lookups. You can
+*optionally*
 connect a brokerage (Robinhood or Questrade) — strictly **read-only** — so picks you already own are
 flagged and you can jump straight to the right buy page.
 
@@ -26,26 +27,43 @@ flagged and you can jump straight to the right buy page.
 flowchart LR
     A[Your prompt] --> B[Identify bottlenecks<br/>Ollama]
     B --> C[Resolve tickers]
+    B --> S[Discover candidates<br/>EDGAR full-text + Yahoo screeners]
+    S --> C
     C --> D[Price feeds<br/>Yahoo / free]
-    D --> E[Growth research<br/>SEC EDGAR + Yahoo]
-    E --> F[News + sentiment<br/>RSS + Ollama]
-    F --> G[Growth + positioning<br/>ranking]
-    G --> H[Ranked stock picks]
+    D --> E[Growth + inflection<br/>SEC EDGAR quarterly]
+    E --> T[Cycle timing · insiders · filings<br/>Yahoo + EDGAR]
+    T --> F[News + sentiment<br/>RSS + Ollama]
+    F --> G[Early-detection<br/>ranking]
+    G --> H[Ranked picks + what changed]
 ```
+
+TrendWave ships in **Early-detection** mode by default: it tries to surface opportunities *before*
+the boom — including names you didn't prompt for — rather than only validating ones you already
+supplied. A single switch (**Settings → Ranking mode → Legacy**) restores the original
+trailing-fundamentals ranking byte-for-byte.
 
 1. **Identify bottlenecks** — the local model reasons about current chokepoints (scarce components,
    limited capacity, single-source suppliers, logistics constraints) and which public companies are
    best positioned to solve or monopolize them.
-2. **Validate & price** — proposed tickers are checked against free price feeds and priced for
+2. **Discover candidates** — beyond the names the model proposes, a screener surfaces more via **SEC
+   EDGAR full-text search** on the bottleneck terms and **Yahoo screeners**, so tickers and spinoffs
+   the local model never heard of (e.g. a recent relisting) can still appear. Each pick is tagged
+   with how it was found.
+3. **Validate & price** — proposed tickers are checked against free price feeds and priced for
    context. Price is never a filter — large caps are welcome if they're the dominant beneficiary.
-3. **Research real growth** — for each ticker TrendWave pulls **audited fundamentals from SEC EDGAR**
-   (multi-year revenue & earnings → real YoY growth, CAGR, profitability), opportunistically enriched
-   with Yahoo forward P/E and analyst-target upside. This yields a **data-derived growth score** that
-   replaces the model's guesswork about upside.
-4. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
-5. **Rank** — a transparent score weights **real growth potential highest (35%)**, then competitive
-   positioning (bottleneck severity + moat), with sentiment and momentum as tie-breakers. Share price
-   is never a filter.
+4. **Research growth & inflection** — for each ticker TrendWave pulls **audited fundamentals from SEC
+   EDGAR** (multi-year revenue & earnings) for a data-derived growth score, and in Early-detection
+   mode also reads **quarterly** filings for **cyclical inflection** (revenue troughs and
+   re-acceleration) plus **estimate revisions** — so a cyclical scores highest near the *bottom* of
+   its cycle, where the upside is, not the top.
+5. **Cycle timing, insiders & filings** — Early-detection adds a **timing label** (Early / Building /
+   Extended / Late) from multi-timeframe price action and relative strength, **insider-buying**
+   clusters (SEC Form 4), and **filing evidence** (8-K / 10-Q capacity & pricing-power language).
+6. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
+7. **Rank & track changes** — a transparent blend combines positioning, growth and the
+   early-detection signals; each pick can explain its score. Re-running a watchlist shows **what
+   changed since last run** (new entrants, rank/score moves, timing shifts). Share price is never a
+   filter.
 
 Progress streams live to the UI, and you can **save any search as a watchlist** to re-run with one
 click later.
@@ -83,9 +101,12 @@ TrendWave is a research tool first, but it can meet you where you actually trade
   OAuth 2.1 PKCE flow (`sha2` / `base64` / `rand`).
 - **Frontend:** React + TypeScript + Tailwind CSS, built with Vite; light/dark theme applied before
   first paint (no flash)
-- **Data:** free public endpoints — Yahoo Finance (prices, search, RSS news; forward P/E & analyst
-  targets) and **SEC EDGAR** (audited fundamentals). No keys required. Connecting a brokerage adds
-  read-only calls to *your own* Robinhood/Questrade account only.
+- **Data:** free public endpoints — Yahoo Finance (prices, search, RSS news, screeners; forward P/E
+  & analyst targets) and **SEC EDGAR** (audited annual & quarterly fundamentals, full-text search,
+  insider Form 4, 8-K/10-Q filings). No keys required. You can *optionally* bring your own paid-data
+  key (e.g. Financial Modeling Prep) for cleaner estimates — stored in the OS keychain, never the
+  database; the app stays fully functional without one. Connecting a brokerage adds read-only calls
+  to *your own* Robinhood/Questrade account only.
 
 ## Getting started 🚀
 
@@ -170,6 +191,8 @@ Open **Settings** from the sidebar to tune:
 | Ollama model | `llama3.1:8b` | Any locally installed model |
 | Ollama endpoint | `http://localhost:11434` | Where the local server listens |
 | Max results | `8` | Cap on returned picks |
+| Ranking mode | Early detection | **Early detection** adds forward signals (inflection, cycle timing, estimate revisions, insider buys, filing evidence) and screener discovery; **Legacy** restores the original trailing-fundamentals ranking byte-for-byte |
+| Market-data source | Free | Free (SEC EDGAR + Yahoo) by default; optionally bring your own paid key (FMP) for cleaner estimates, stored in the OS keychain |
 | Scan news & sentiment | on | Pull headlines and score sentiment (slower) |
 | Research real growth | on | Pull SEC EDGAR + Yahoo fundamentals to drive the growth score (slower) |
 | Require biometric unlock | on | Gate a connected broker session behind Touch ID / Windows Hello (auto-off where unsupported) |
@@ -194,6 +217,13 @@ TrendWave/
 │   ├── lib.rs           # App bootstrap, state, command registration
 │   ├── commands.rs      # Tauri IPC commands
 │   ├── research.rs      # The bottleneck → ranking pipeline
+│   ├── scoring.rs       # Scoring modes + weighted blend (Legacy / Early detection)
+│   ├── providers.rs     # Data-provider abstraction (free default + optional BYO-key paid)
+│   ├── screener.rs      # Candidate discovery (EDGAR full-text + Yahoo screeners)
+│   ├── inflection.rs    # Quarterly EDGAR inflection + estimate-revision signals
+│   ├── technical.rs     # Cycle timing / relative strength (Early/Building/Extended/Late)
+│   ├── filings.rs       # Insider Form 4 + 8-K/10-Q keyword signals (EDGAR)
+│   ├── changes.rs       # Run-over-run change detection (what changed since last run)
 │   ├── ollama.rs        # Local Ollama client
 │   ├── feeds.rs         # Free price + news feeds (Yahoo)
 │   ├── fundamentals.rs  # Real growth research (SEC EDGAR + Yahoo enrichment)
@@ -214,9 +244,11 @@ TrendWave/
 ## Privacy 🔒
 
 TrendWave is local-first by design. Your prompts and results never leave your machine. The only
-outbound network calls are to free, public endpoints — Yahoo Finance (prices & news) and SEC EDGAR
-(audited fundamentals) — and to your local Ollama server. SEC requests send a descriptive
-User-Agent with a contact address, per SEC's fair-access policy.
+outbound network calls are to free, public endpoints — Yahoo Finance (prices, news & screeners) and
+SEC EDGAR (audited fundamentals, full-text search, insider & company filings) — and to your local
+Ollama server. SEC requests send a descriptive User-Agent with a contact address, per SEC's
+fair-access policy. If you opt into a paid data provider, its API key is stored in your **OS
+keychain** (never the database or a file) and paid data is not written to saved-watchlist caches.
 
 If you connect a brokerage, TrendWave also talks to **your own** account at that broker — Robinhood
 (`agent.robinhood.com`, `api.robinhood.com`) or Questrade (`login.questrade.com`,

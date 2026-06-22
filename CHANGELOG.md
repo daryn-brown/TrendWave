@@ -14,6 +14,37 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-06-22
+
+### Added
+- **Early-detection ranking (new default).** TrendWave now tries to surface opportunities
+  *before* the boom instead of only validating names you already supplied. The ranking blend
+  adds five forward-looking signals on top of the classic positioning score:
+  - **Cyclical inflection** — reads *quarterly* SEC filings to detect revenue troughs and
+    re-acceleration, so a cyclical scores highest near the bottom of its cycle (where the upside
+    is) rather than the top.
+  - **Cycle timing** — labels each pick **Early / Building / Extended / Late** from
+    multi-timeframe price action and relative strength, so you can see how early you are.
+  - **Estimate revisions** — rewards rising analyst estimates and growing analyst coverage.
+  - **Insider buying** — flags clusters of open-market insider purchases (SEC Form 4).
+  - **Filing evidence** — scans recent 8-K / 10-Q language for capacity, shortage and
+    pricing-power tells.
+- **Candidate discovery.** A new screener surfaces names you didn't prompt for — via SEC EDGAR
+  full-text search on the bottleneck terms and Yahoo screeners — so tickers and spinoffs the
+  local model never heard of (e.g. a recent relisting) can still appear. Each pick is tagged with
+  how it was found.
+- **"What changed since last run" panel.** Re-running a watchlist now diffs against the previous
+  run and highlights new entrants, drops, rank/score moves, and timing-label changes.
+- **Per-pick "Why this score" breakdown.** Each pick can expand to show exactly how every signal
+  contributed to its score.
+- **Optional paid data source (bring your own key).** Advanced users can plug in a Financial
+  Modeling Prep API key for cleaner estimate data. The key lives in your OS keychain, never the
+  database, and the app stays fully functional — and free — without one.
+
+### Changed
+- The default ranking mode is now **Early detection**. Your original ranking is preserved exactly:
+  switch **Settings → Ranking mode → Legacy** to restore the previous behavior byte-for-byte.
+
 ## [1.3.2] - 2026-06-21
 
 ### Added
@@ -47,7 +78,8 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
 - Updated frontend toolchain: React and React DOM 19.2.7, TypeScript 6.0.3, Vite 8
   and @vitejs/plugin-react 6.
 
-[Unreleased]: https://github.com/daryn-brown/TrendWave/compare/app-v1.3.2...HEAD
+[Unreleased]: https://github.com/daryn-brown/TrendWave/compare/app-v3.0.0...HEAD
+[3.0.0]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v3.0.0
 [1.3.2]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.2
 [1.3.1]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.1
 [1.3.0]: https://github.com/daryn-brown/TrendWave/releases/tag/app-v1.3.0

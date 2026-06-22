@@ -20,11 +20,12 @@ use serde::Deserialize;
 use tokio::sync::OnceCell;
 
 use crate::model::GrowthData;
+use crate::providers::EstimateRevisions;
 
 /// SEC fair-access requires a descriptive User-Agent that includes a contact
 /// email; Akamai 403s generic tool UAs. Operators should substitute their own
 /// address. See https://www.sec.gov/os/webmaster-faq#developers.
-const EDGAR_UA: &str = "TrendWave/0.1 (admin@trendwave.app)";
+pub(crate) const EDGAR_UA: &str = "TrendWave/0.1 (admin@trendwave.app)";
 /// Yahoo blocks obvious bots; present as a normal browser for the crumb dance.
 const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
 AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -183,16 +184,16 @@ struct ConceptResponse {
 }
 
 #[derive(Deserialize, Clone)]
-struct ConceptPoint {
+pub(crate) struct ConceptPoint {
     #[serde(default)]
-    start: Option<String>,
+    pub(crate) start: Option<String>,
     #[serde(default)]
-    end: Option<String>,
-    val: f64,
+    pub(crate) end: Option<String>,
+    pub(crate) val: f64,
     #[serde(default)]
-    form: Option<String>,
+    pub(crate) form: Option<String>,
     #[serde(default)]
-    frame: Option<String>,
+    pub(crate) frame: Option<String>,
 }
 
 async fn edgar_growth(http: &reqwest::Client, ticker: &str) -> Option<EdgarOut> {
@@ -233,7 +234,9 @@ async fn edgar_growth(http: &reqwest::Client, ticker: &str) -> Option<EdgarOut> 
     })
 }
 
-async fn cik_for(http: &reqwest::Client, ticker: &str) -> Option<String> {
+/// Shared ticker→CIK lookup (reuses the process-wide cached map). Exposed so the
+/// inflection module can resolve CIKs without re-fetching the ~800KB map.
+pub(crate) async fn cik_for(http: &reqwest::Client, ticker: &str) -> Option<String> {
     let map = CIK_MAP
         .get_or_try_init(|| load_cik_map(http))
         .await
@@ -262,6 +265,23 @@ async fn fetch_concept(
     cik: &str,
     concept: &str,
 ) -> Option<Vec<(i32, f64)>> {
+    let points = fetch_concept_points(http, cik, concept).await?;
+    let series = annual_series(&points);
+    if series.is_empty() {
+        None
+    } else {
+        Some(series)
+    }
+}
+
+/// Fetch the raw USD `companyconcept` points for one us-gaap tag. Returns the
+/// unreduced series so callers can reduce to annual *or* quarterly cadence.
+/// Shared with the inflection module. Best-effort: `None` on any HTTP/parse miss.
+pub(crate) async fn fetch_concept_points(
+    http: &reqwest::Client,
+    cik: &str,
+    concept: &str,
+) -> Option<Vec<ConceptPoint>> {
     let url =
         format!("https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/us-gaap/{concept}.json");
     let resp = http.get(&url).header(USER_AGENT, EDGAR_UA).send().await.ok()?;
@@ -270,11 +290,10 @@ async fn fetch_concept(
     }
     let parsed: ConceptResponse = resp.json().await.ok()?;
     let usd = parsed.units.get("USD")?;
-    let series = annual_series(usd);
-    if series.is_empty() {
+    if usd.is_empty() {
         None
     } else {
-        Some(series)
+        Some(usd.clone())
     }
 }
 
@@ -484,6 +503,51 @@ impl YahooEnrich {
             earnings_growth: raw(&financial["earningsGrowth"]),
         })
     }
+
+    /// Best-effort current analyst recommendation breakdown — the **free** path
+    /// for the estimate-revisions signal. Returns `None` on any handshake or
+    /// parse miss, so the caller degrades to no-revisions (scored neutral).
+    pub async fn fetch_recommendations(&self, symbol: &str) -> Option<EstimateRevisions> {
+        let safe_symbol = crate::feeds::validate_ticker(symbol).ok()?;
+        let value: serde_json::Value = self
+            .client
+            .get(format!(
+                "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{safe_symbol}"
+            ))
+            .query(&[
+                ("modules", "recommendationTrend"),
+                ("crumb", self.crumb.as_str()),
+            ])
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        let node = value["quoteSummary"]["result"].get(0)?;
+        parse_yahoo_recommendations(&node["recommendationTrend"])
+    }
+}
+
+/// Reduce Yahoo's `recommendationTrend` to normalized revision counts, preferring
+/// the current period (`"0m"`). Pure for testability. `None` when there is no
+/// usable coverage so the caller degrades gracefully.
+fn parse_yahoo_recommendations(trend_node: &serde_json::Value) -> Option<EstimateRevisions> {
+    let trend = trend_node["trend"].as_array()?;
+    let row = trend
+        .iter()
+        .find(|t| t["period"].as_str() == Some("0m"))
+        .or_else(|| trend.first())?;
+    let count = |key: &str| row[key].as_u64().unwrap_or(0) as u32;
+
+    let up = count("strongBuy") + count("buy");
+    let down = count("sell") + count("strongSell");
+    let total = up + count("hold") + down;
+    if total == 0 {
+        None
+    } else {
+        Some(EstimateRevisions { up, down, total })
+    }
 }
 
 #[cfg(test)]
@@ -633,5 +697,28 @@ mod tests {
         assert!(sane_forward_pe(-3.0, 1.0).is_none()); // negative
         assert_eq!(sane_forward_pe(22.5, 1.0), Some(22.5)); // ordinary multiple
         assert_eq!(subunit_factor("USD"), 1.0);
+    }
+
+    #[test]
+    fn parses_yahoo_recommendation_trend_current_period() {
+        let node = serde_json::json!({
+            "trend": [
+                { "period": "0m", "strongBuy": 5, "buy": 12, "hold": 3, "sell": 1, "strongSell": 0 },
+                { "period": "-1m", "strongBuy": 1, "buy": 1, "hold": 9, "sell": 4, "strongSell": 2 }
+            ]
+        });
+        let rev = parse_yahoo_recommendations(&node).expect("usable coverage");
+        assert_eq!(rev.up, 17); // 5 + 12
+        assert_eq!(rev.down, 1); // 1 + 0
+        assert_eq!(rev.total, 21); // 17 up + 3 hold + 1 down
+        assert!(rev.net_bias() > 0.7);
+    }
+
+    #[test]
+    fn yahoo_recommendation_parser_rejects_empty_coverage() {
+        assert!(parse_yahoo_recommendations(&serde_json::json!({ "trend": [] })).is_none());
+        assert!(parse_yahoo_recommendations(&serde_json::json!({})).is_none());
+        let no_votes = serde_json::json!({ "trend": [{ "period": "0m" }] });
+        assert!(parse_yahoo_recommendations(&no_votes).is_none());
     }
 }

@@ -4,6 +4,7 @@ import * as api from "./api";
 import {
   BottleneckList,
   CandidateCard,
+  ChangesPanel,
   ErrorBanner,
   IconRefresh,
   IconSearch,
@@ -479,6 +480,8 @@ export default function App() {
               onSave={() => setSaveName("")}
             />
           )}
+
+          {result?.changes && <ChangesPanel changes={result.changes} />}
 
           <BottleneckList items={bottlenecks} />
 

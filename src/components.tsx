@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   resolveBuyOptions,
@@ -8,15 +8,25 @@ import {
   type BuyOption,
   type BrokerId,
 } from "./brokers";
+import {
+  dataProviderStatus,
+  dataProviderSetKey,
+  dataProviderClearKey,
+} from "./api";
 import type {
   AppErrorShape,
   Bottleneck,
   Candidate,
+  DataProviderStatus,
   GrowthData,
   Portfolio,
+  ProviderKind,
   QuestradeStatus,
   RobinhoodStatus,
+  RunChanges,
+  ScoringMode,
   Settings,
+  SignalBreakdown,
   Watchlist,
 } from "./types";
 
@@ -365,7 +375,160 @@ export function BottleneckList({ items }: { items: Bottleneck[] }) {
   );
 }
 
+// ---- What changed since last run (Phase 5) ----------------------------------
+
+function changesIsEmpty(c: RunChanges): boolean {
+  return (
+    c.new_entrants.length === 0 &&
+    c.dropped.length === 0 &&
+    c.rank_moves.length === 0 &&
+    c.score_moves.length === 0 &&
+    c.timing_shifts.length === 0
+  );
+}
+
+function ChangeRow({ tone, label, children }: { tone: string; label: string; children: ReactNode }) {
+  return (
+    <li className="flex items-baseline gap-2 text-sm">
+      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${tone}`}>
+        {label}
+      </span>
+      <span className="text-slate-600 dark:text-slate-300">{children}</span>
+    </li>
+  );
+}
+
+export function ChangesPanel({ changes }: { changes: RunChanges }) {
+  if (changesIsEmpty(changes)) return null;
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+        What changed since last run
+      </h3>
+      <ul className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        {changes.new_entrants.map((e) => (
+          <ChangeRow key={`new-${e.ticker}`} tone="bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30" label="New">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{e.ticker}</span> {e.company}
+            <span className="text-slate-400 dark:text-slate-500"> · score {Math.round(e.score)}</span>
+            {e.timing ? <span className="text-slate-400 dark:text-slate-500"> · {e.timing}</span> : null}
+          </ChangeRow>
+        ))}
+        {changes.timing_shifts.map((t) => (
+          <ChangeRow key={`timing-${t.ticker}`} tone="bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-500/30" label="Timing">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{t.ticker}</span>{" "}
+            {t.from ?? "—"} → {t.to ?? "—"}
+          </ChangeRow>
+        ))}
+        {changes.rank_moves.map((m) => (
+          <ChangeRow key={`rank-${m.ticker}`} tone="bg-indigo-50 text-indigo-700 ring-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-300 dark:ring-indigo-500/30" label={m.to < m.from ? "Rank ↑" : "Rank ↓"}>
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{m.ticker}</span>{" "}
+            #{m.from} → #{m.to}
+          </ChangeRow>
+        ))}
+        {changes.score_moves.map((s) => (
+          <ChangeRow key={`score-${s.ticker}`} tone="bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30" label={s.to > s.from ? "Score ↑" : "Score ↓"}>
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{s.ticker}</span>{" "}
+            {Math.round(s.from)} → {Math.round(s.to)}
+          </ChangeRow>
+        ))}
+        {changes.dropped.map((e) => (
+          <ChangeRow key={`drop-${e.ticker}`} tone="bg-slate-100 text-slate-500 ring-slate-200 dark:bg-slate-700/30 dark:text-slate-400 dark:ring-slate-600/40" label="Dropped">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">{e.ticker}</span> {e.company} left the list
+          </ChangeRow>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 // ---- Candidate card ---------------------------------------------------------
+
+// Early-detection explainability (Phase 7): cycle-timing badge, discovery
+// provenance badge, and a per-term "why this score" breakdown.
+
+const TIMING_STYLE: Record<string, string> = {
+  Early: "bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30",
+  Building: "bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-500/30",
+  Extended: "bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30",
+  Late: "bg-rose-50 text-rose-700 ring-rose-200 dark:bg-rose-500/10 dark:text-rose-300 dark:ring-rose-500/30",
+};
+
+function timingStyle(label: string): string {
+  return (
+    TIMING_STYLE[label] ??
+    "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700"
+  );
+}
+
+function discoveryLabel(d?: string | null): string | null {
+  if (!d) return null;
+  if (d === "screener:edgar-fts") return "Found in SEC filings";
+  if (d === "screener:yahoo") return "Found by screener";
+  if (d.startsWith("screener")) return "Discovered";
+  if (d === "both") return "Model + screener";
+  return null; // "model" is the default origin — no badge needed
+}
+
+const BREAKDOWN_TERMS: { key: keyof SignalBreakdown; label: string; forward?: boolean }[] = [
+  { key: "severity", label: "Bottleneck severity" },
+  { key: "moat", label: "Moat / positioning" },
+  { key: "growth", label: "Trailing growth" },
+  { key: "sentiment", label: "News sentiment" },
+  { key: "momentum", label: "Price momentum" },
+  { key: "inflection", label: "Cyclical inflection", forward: true },
+  { key: "technical", label: "Cycle timing", forward: true },
+  { key: "revisions", label: "Estimate revisions", forward: true },
+  { key: "insider", label: "Insider buying", forward: true },
+  { key: "filing", label: "Filing evidence", forward: true },
+];
+
+function ScoreBreakdownPanel({ breakdown }: { breakdown: SignalBreakdown }) {
+  const [open, setOpen] = useState(false);
+  const terms = BREAKDOWN_TERMS.filter((t) => (breakdown[t.key] as number) > 0.05);
+  if (terms.length === 0) return null;
+  const max = Math.max(...terms.map((t) => breakdown[t.key] as number));
+  const hasForward = terms.some((t) => t.forward);
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-800">
+      <button
+        onClick={() => setOpen((s) => !s)}
+        aria-expanded={open}
+        className="text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+      >
+        {open ? "Hide score breakdown" : "Why this score"} · {Math.round(breakdown.total)} pts
+      </button>
+      {open && (
+        <>
+          <ul className="mt-2 space-y-1.5">
+            {terms.map((t) => {
+              const v = breakdown[t.key] as number;
+              return (
+                <li key={t.key} className="flex items-center gap-2">
+                  <span className="w-32 shrink-0 text-[11px] text-slate-500 dark:text-slate-400">{t.label}</span>
+                  <span className="relative h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                    <span
+                      className={`absolute inset-y-0 left-0 rounded-full ${t.forward ? "bg-sky-500" : "bg-slate-400 dark:bg-slate-500"}`}
+                      style={{ width: `${Math.min(100, (v / max) * 100)}%` }}
+                    />
+                  </span>
+                  <span className="w-8 shrink-0 text-right text-[11px] tabular-nums text-slate-500 dark:text-slate-400">
+                    {v.toFixed(1)}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+          {hasForward && (
+            <p className="mt-2 text-[11px] leading-4 text-slate-400 dark:text-slate-500">
+              <span className="inline-block h-2 w-2 rounded-full bg-sky-500 align-middle" /> forward
+              early-detection signals; the rest are the classic positioning terms.
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
 
 function NewsLink({ url, children }: { url: string; children: ReactNode }) {
   return (
@@ -440,6 +603,16 @@ export function CandidateCard({
         <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 ring-1 ring-indigo-100 dark:bg-indigo-500/10 dark:text-indigo-300 dark:ring-indigo-500/20">
           Moat {candidate.moat}/5
         </span>
+        {candidate.timing && (
+          <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ring-1 ${timingStyle(candidate.timing)}`}>
+            {candidate.timing}
+          </span>
+        )}
+        {discoveryLabel(candidate.discovery) && (
+          <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-medium text-violet-700 ring-1 ring-violet-100 dark:bg-violet-500/10 dark:text-violet-300 dark:ring-violet-500/20">
+            {discoveryLabel(candidate.discovery)}
+          </span>
+        )}
         {!candidate.identity_mismatch &&
           (candidate.growth?.revenue_growth_yoy != null ? (
             <span
@@ -483,6 +656,8 @@ export function CandidateCard({
       ) : (
         <p className="mt-3 text-xs text-slate-400 dark:text-slate-500">No growth fundamentals found for this ticker.</p>
       )}
+
+      {candidate.breakdown && <ScoreBreakdownPanel breakdown={candidate.breakdown} />}
 
       {candidate.news.length > 0 && (
         <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-800">
@@ -869,6 +1044,8 @@ export function SettingsModal({
             <input type="checkbox" checked={form.use_fundamentals} onChange={(e) => update("use_fundamentals", e.target.checked)} className="h-4 w-4 rounded border-slate-300 dark:border-slate-600 dark:bg-slate-800" />
             Research real growth (SEC EDGAR + Yahoo) to rank picks
           </label>
+          <ScoringModeField value={form.scoring_mode} onChange={(v) => update("scoring_mode", v)} />
+          <DataProviderSection provider={form.data_provider} onChangeProvider={(p) => update("data_provider", p)} />
           <RobinhoodSection
             status={robinhood}
             busy={robinhoodBusy}
@@ -895,6 +1072,166 @@ export function SettingsModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---- Ranking & data provider settings --------------------------------------
+
+function ScoringModeField({ value, onChange }: { value: ScoringMode; onChange: (v: ScoringMode) => void }) {
+  const opts: { val: ScoringMode; label: string; hint: string }[] = [
+    {
+      val: "early_detection",
+      label: "Early detection",
+      hint: "Adds forward signals — cyclical inflection, cycle timing, estimate revisions, insider buys, filing evidence — and screener discovery.",
+    },
+    {
+      val: "legacy",
+      label: "Legacy",
+      hint: "Original trailing-fundamentals ranking, byte-for-byte unchanged.",
+    },
+  ];
+  return (
+    <div>
+      <p className="text-sm font-medium text-slate-700 dark:text-slate-200">Ranking mode</p>
+      <div className="mt-2 space-y-2">
+        {opts.map((o) => {
+          const active = value === o.val;
+          return (
+            <label
+              key={o.val}
+              className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-3 ${
+                active
+                  ? "border-sky-300 bg-sky-50/60 dark:border-sky-500/40 dark:bg-sky-500/10"
+                  : "border-slate-200 dark:border-slate-800"
+              }`}
+            >
+              <input
+                type="radio"
+                name="scoring_mode"
+                checked={active}
+                onChange={() => onChange(o.val)}
+                className="mt-0.5 h-4 w-4 border-slate-300 text-sky-600 dark:border-slate-600 dark:bg-slate-800"
+              />
+              <span>
+                <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">{o.label}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-slate-500 dark:text-slate-400">{o.hint}</span>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DataProviderSection({
+  provider,
+  onChangeProvider,
+}: {
+  provider: ProviderKind;
+  onChangeProvider: (p: ProviderKind) => void;
+}) {
+  const [status, setStatus] = useState<DataProviderStatus | null>(null);
+  const [keyInput, setKeyInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    dataProviderStatus()
+      .then(setStatus)
+      .catch(() => {});
+  }, []);
+
+  const hasKey = status?.has_key ?? false;
+
+  const saveKey = async () => {
+    const key = keyInput.trim();
+    if (!key) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await dataProviderSetKey(key);
+      setKeyInput("");
+      setStatus(await dataProviderStatus());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearKey = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await dataProviderClearKey();
+      setStatus(await dataProviderStatus());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="rounded-2xl border border-slate-200 p-3 dark:border-slate-800">
+      <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Market-data source</p>
+      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+        Free (SEC EDGAR + Yahoo) covers everything out of the box. Optionally bring your own paid key for
+        cleaner estimate revisions and history — it stays in your OS keychain, never the database.
+      </p>
+      <div className="mt-3 flex gap-2">
+        {(["free", "fmp"] as ProviderKind[]).map((p) => {
+          const active = provider === p;
+          return (
+            <button
+              key={p}
+              onClick={() => onChangeProvider(p)}
+              className={`flex-1 rounded-xl border px-3 py-1.5 text-xs font-medium ${
+                active
+                  ? "border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-500/40 dark:bg-sky-500/10 dark:text-sky-300"
+                  : "border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              }`}
+            >
+              {p === "free" ? "Free" : "FMP (paid key)"}
+            </button>
+          );
+        })}
+      </div>
+      {provider === "fmp" && (
+        <div className="mt-3 space-y-2">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            {hasKey ? "An API key is stored in your keychain." : "No API key stored — falls back to free data until you add one."}
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={keyInput}
+              onChange={(e) => setKeyInput(e.target.value)}
+              placeholder={hasKey ? "Replace stored key…" : "Financial Modeling Prep API key"}
+              className="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            />
+            <button
+              onClick={saveKey}
+              disabled={busy || !keyInput.trim()}
+              className="rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-sky-600 dark:hover:bg-sky-500"
+            >
+              Save key
+            </button>
+          </div>
+          {hasKey && (
+            <button
+              onClick={clearKey}
+              disabled={busy}
+              className="text-xs font-medium text-rose-600 hover:text-rose-700 disabled:opacity-40 dark:text-rose-400"
+            >
+              Remove stored key
+            </button>
+          )}
+          {error && <p className="text-xs text-rose-600 dark:text-rose-400">{error}</p>}
+        </div>
+      )}
     </div>
   );
 }

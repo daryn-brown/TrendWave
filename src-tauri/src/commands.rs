@@ -15,6 +15,7 @@ use crate::model::{Listing, ListingInfo, Portfolio, ProgressEvent, ResearchResul
 use crate::oauth;
 use crate::ollama::OllamaClient;
 use crate::onboarding::{self, OllamaStatus, SystemReport};
+use crate::providers::{self, ProviderKind};
 use crate::questrade;
 use crate::research;
 use crate::robinhood::{self, RobinhoodClient};
@@ -71,7 +72,7 @@ pub async fn run_research(
     prompt: String,
     on_event: Channel<ProgressEvent>,
 ) -> AppResult<ResearchResult> {
-    execute(&state, &prompt, &on_event).await
+    execute(&state, &prompt, &on_event, None).await
 }
 
 #[tauri::command]
@@ -80,11 +81,12 @@ pub async fn run_watchlist(
     id: i64,
     on_event: Channel<ProgressEvent>,
 ) -> AppResult<ResearchResult> {
-    let prompt = {
+    let (prompt, previous) = {
         let conn = state.lock_db()?;
-        db::get_watchlist(&conn, id)?.prompt
+        let wl = db::get_watchlist(&conn, id)?;
+        (wl.prompt, wl.last_result)
     };
-    let result = execute(&state, &prompt, &on_event).await?;
+    let result = execute(&state, &prompt, &on_event, previous).await?;
     let conn = state.lock_db()?;
     db::update_watchlist_result(&conn, id, &result)?;
     Ok(result)
@@ -423,6 +425,43 @@ pub async fn questrade_find_listing(
     .await
 }
 
+// --- Optional paid data provider --------------------------------------------
+
+/// The selected market-data provider plus whether a paid API key is currently
+/// stored. `has_key` is read from a non-secret flag (not the keychain) so
+/// opening Settings never triggers a system password prompt.
+#[derive(serde::Serialize)]
+pub struct DataProviderStatus {
+    pub provider: ProviderKind,
+    pub has_key: bool,
+}
+
+#[tauri::command]
+pub async fn data_provider_status(state: State<'_, AppState>) -> AppResult<DataProviderStatus> {
+    let conn = state.lock_db()?;
+    Ok(DataProviderStatus {
+        provider: db::load_settings(&conn)?.data_provider,
+        has_key: db::get_flag(&conn, db::FLAG_DATA_PROVIDER_KEY_SET)?,
+    })
+}
+
+/// Store a paid-provider API key in the OS keychain and record that one is set.
+/// The key itself never touches SQLite, settings JSON, or logs.
+#[tauri::command]
+pub async fn data_provider_set_key(state: State<'_, AppState>, key: String) -> AppResult<()> {
+    providers::save_key(&key)?;
+    let conn = state.lock_db()?;
+    db::set_flag(&conn, db::FLAG_DATA_PROVIDER_KEY_SET, true)
+}
+
+/// Remove the stored paid-provider API key and clear the "key set" flag.
+#[tauri::command]
+pub async fn data_provider_clear_key(state: State<'_, AppState>) -> AppResult<()> {
+    providers::clear_key()?;
+    let conn = state.lock_db()?;
+    db::set_flag(&conn, db::FLAG_DATA_PROVIDER_KEY_SET, false)
+}
+
 /// Shared body for both the ad-hoc prompt and watchlist re-runs: load settings,
 /// confirm Ollama is ready (so failures are one clear message), then stream the
 /// pipeline's progress to the frontend channel.
@@ -430,6 +469,7 @@ async fn execute(
     state: &AppState,
     prompt: &str,
     on_event: &Channel<ProgressEvent>,
+    previous: Option<ResearchResult>,
 ) -> AppResult<ResearchResult> {
     if prompt.trim().is_empty() {
         return Err(AppError::Other("Please enter a question first.".into()));
@@ -468,7 +508,7 @@ async fn execute(
         }
     }
 
-    match research::run_research(&ollama, &state.http, &settings, prompt, &owned, &emit).await {
+    match research::run_research(&ollama, &state.http, &settings, prompt, &owned, previous.as_ref(), &emit).await {
         Ok(result) => Ok(result),
         Err(err) => {
             let _ = on_event.send(ProgressEvent::Failed {

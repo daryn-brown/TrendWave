@@ -2,6 +2,9 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::changes::RunChanges;
+use crate::scoring::SignalBreakdown;
+
 /// A supply-chain / capacity / production chokepoint the model identified for
 /// the requested industry. This is the primary signal of the whole app, so it
 /// is a first-class type rather than free text.
@@ -109,6 +112,15 @@ pub struct Candidate {
     pub news: Vec<NewsItem>,
     /// Composite 0-100 score used for ranking (positioning + upside weighted).
     pub score: f64,
+    /// Per-term weighted contributions behind `score`, so the UI can explain
+    /// *why* a pick ranked where it did. `None` for older cached results.
+    pub breakdown: Option<SignalBreakdown>,
+    /// Cycle-timing label (e.g. "Early" / "Building" / "Extended" / "Late") set by
+    /// the technical phase; `None` until that signal is computed.
+    pub timing: Option<String>,
+    /// How this candidate was surfaced — e.g. "model", "screener:yahoo",
+    /// "screener:edgar-fts", or "both". `None` on legacy results (implicitly model).
+    pub discovery: Option<String>,
     /// `true` when this ticker is held in the user's connected Robinhood account.
     /// Read-only context for the UI ("In your portfolio") — never affects ranking.
     #[serde(default)]
@@ -123,6 +135,11 @@ pub struct ResearchResult {
     pub bottlenecks: Vec<Bottleneck>,
     pub candidates: Vec<Candidate>,
     pub disclaimer: String,
+    /// What changed versus the previous run of the same saved query. `None` for
+    /// a first run or an ad-hoc prompt with no baseline; `#[serde(default)]`
+    /// keeps older cached results loadable.
+    #[serde(default)]
+    pub changes: Option<RunChanges>,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +248,7 @@ pub enum ProgressEvent {
     Stage { stage: String, message: String },
     Bottlenecks { items: Vec<Bottleneck> },
     Candidate { candidate: Candidate },
+    Changes { changes: RunChanges },
     Done { result: ResearchResult },
     Failed { kind: String, message: String },
 }
