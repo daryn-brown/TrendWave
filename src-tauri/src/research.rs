@@ -14,6 +14,7 @@ use crate::providers::DataProvider;
 use crate::scoring::{self, ScoringMode, ScoringWeights, SignalBreakdown, Signals};
 use crate::screener;
 use crate::settings::Settings;
+use crate::technical;
 
 const SYSTEM_BOTTLENECK: &str = "\
 You are a sharp equity research analyst who specializes in SUPPLY-CHAIN and CAPACITY \
@@ -117,6 +118,7 @@ struct Working {
     /// `None` when unavailable or in `Legacy` mode → scored neutral).
     inflection: Option<f64>,
     revisions: Option<f64>,
+    technical: Option<f64>,
 }
 
 /// Legacy positional scorer used by the equivalence/monotonicity test-suite.
@@ -281,6 +283,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                 severity,
                 inflection: None,
                 revisions: None,
+                technical: None,
                 candidate: Candidate {
                     ticker,
                     company: c.company.clone(),
@@ -359,6 +362,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                 severity,
                 inflection: None,
                 revisions: None,
+                technical: None,
                 candidate: Candidate {
                     ticker: d.ticker,
                     company: d.company,
@@ -487,25 +491,27 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         }
     }
 
-    // Early-detection enrichment: quarterly **inflection** (free SEC EDGAR) plus
+    // Early-detection enrichment: quarterly **inflection** (free SEC EDGAR),
     // **estimate revisions** (paid provider when active, else free Yahoo analyst
-    // recommendations). Gated on `EarlyDetection` so `Legacy` stays byte-identical
-    // and skips these extra network round-trips entirely.
+    // recommendations), and **technical / cycle-timing** (Yahoo chart vs. an SPY
+    // benchmark). Gated on `EarlyDetection` so `Legacy` stays byte-identical and
+    // skips these extra network round-trips entirely.
     if settings.scoring_mode == ScoringMode::EarlyDetection {
         let provider = DataProvider::resolve(settings.data_provider);
         let message = if provider.is_active() {
             format!(
-                "Detecting inflection & estimate revisions (revisions via {})…",
+                "Detecting inflection, revisions & timing (revisions via {})…",
                 provider.kind.label()
             )
         } else {
-            "Detecting inflection & estimate revisions…".into()
+            "Detecting inflection, revisions & timing…".into()
         };
         emit(ProgressEvent::Stage {
             stage: "inflection".into(),
             message,
         });
         let yahoo = YahooEnrich::init().await;
+        let benchmark = Arc::new(technical::fetch_benchmark(http).await);
         let limit = Arc::new(Semaphore::new(4));
         let mut set = tokio::task::JoinSet::new();
         for (idx, w) in working.iter().enumerate() {
@@ -513,6 +519,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             let ticker = w.candidate.ticker.clone();
             let yahoo = yahoo.clone();
             let provider = provider.clone();
+            let benchmark = benchmark.clone();
             let limit = limit.clone();
             set.spawn(async move {
                 let _permit = limit.acquire_owned().await.ok();
@@ -525,13 +532,18 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                         None => None,
                     },
                 };
-                (idx, inflection, revisions.map(|r| r.score()))
+                let technical = technical::fetch_technical(&http, &ticker, &benchmark).await;
+                (idx, inflection, revisions.map(|r| r.score()), technical)
             });
         }
         while let Some(joined) = set.join_next().await {
-            if let Ok((idx, inflection, revisions)) = joined {
+            if let Ok((idx, inflection, revisions, technical)) = joined {
                 working[idx].inflection = inflection;
                 working[idx].revisions = revisions;
+                if let Some(t) = technical {
+                    working[idx].technical = Some(t.score);
+                    working[idx].candidate.timing = Some(t.timing.as_str().to_string());
+                }
             }
         }
     }
@@ -555,10 +567,10 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             (w.candidate.upside.clamp(1, 5) as f64) / 5.0
         };
         w.candidate.growth_score = growth;
-        // Early-detection signals (inflection, revisions) are populated above in
-        // `EarlyDetection` mode and sit `None` (scored neutral) in `Legacy` mode,
-        // so this still reduces to the legacy formula exactly under legacy weights.
-        // Technical, insider and filing terms arrive in later phases.
+        // Early-detection signals (inflection, revisions, technical) are populated
+        // above in `EarlyDetection` mode and sit `None` (scored neutral) in
+        // `Legacy` mode, so this still reduces to the legacy formula exactly under
+        // legacy weights. Insider and filing terms arrive in later phases.
         let signals = Signals {
             severity: w.severity,
             moat: w.candidate.moat,
@@ -567,6 +579,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             change_pct: w.candidate.price.as_ref().map(|p| p.change_pct).unwrap_or(0.0),
             inflection: w.inflection,
             revisions: w.revisions,
+            technical: w.technical,
             ..Default::default()
         };
         let mut breakdown = scoring::composite_score(&weights, &signals);

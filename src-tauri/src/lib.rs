@@ -17,6 +17,7 @@ mod robinhood;
 mod scoring;
 mod screener;
 mod settings;
+mod technical;
 
 use std::sync::Mutex;
 use std::time::Duration;
