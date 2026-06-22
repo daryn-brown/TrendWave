@@ -12,6 +12,7 @@ use crate::model::{Bottleneck, Candidate, ProgressEvent, ResearchResult, DISCLAI
 use crate::ollama::OllamaClient;
 use crate::providers::DataProvider;
 use crate::scoring::{self, ScoringMode, ScoringWeights, SignalBreakdown, Signals};
+use crate::screener;
 use crate::settings::Settings;
 
 const SYSTEM_BOTTLENECK: &str = "\
@@ -35,6 +36,12 @@ companies per bottleneck.";
 const SYSTEM_SENTIMENT: &str = "\
 You judge market sentiment from news headlines about one company. Respond with STRICT JSON \
 only: {\"score\":number} where score is between -1 (very bearish) and 1 (very bullish).";
+
+/// Upper bound on candidates the Phase 2 screener may add to a single run, so a
+/// broad discovery net can't balloon the downstream pricing/fundamentals/news
+/// fan-out. Discovered names still compete on score and are trimmed to
+/// `max_results` like everything else.
+const MAX_DISCOVERED: usize = 10;
 
 // Scoring weights and the composite formula now live in `crate::scoring`
 // (`ScoringWeights` presets + `composite_score`). `score_candidate` below
@@ -293,6 +300,84 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                     breakdown: None,
                     timing: None,
                     discovery: None,
+                    owned: false,
+                },
+            });
+        }
+    }
+
+    // Candidate discovery (Phase 2): in EarlyDetection mode, augment the model's
+    // picks with names surfaced from free live sources — SEC EDGAR full-text
+    // search on each bottleneck's own vocabulary plus Yahoo market screeners.
+    // This breaks the model's training-cutoff ceiling: an EDGAR search for "NAND"
+    // surfaces Micron / Western Digital on-thesis, and a momentum screener
+    // surfaces post-cutoff relistings (e.g. SanDisk) the model has never heard
+    // of. Gated on EarlyDetection so Legacy stays byte-identical and skips the
+    // extra network calls entirely.
+    if settings.scoring_mode == ScoringMode::EarlyDetection {
+        emit(ProgressEvent::Stage {
+            stage: "discovery".into(),
+            message: "Discovering candidates the prompt didn't name…".into(),
+        });
+        let inputs: Vec<(String, String)> = bottlenecks
+            .iter()
+            .map(|b| (b.title.clone(), b.description.clone()))
+            .collect();
+        let severities: std::collections::HashMap<String, u8> =
+            bottlenecks.iter().map(|b| (b.title.clone(), b.severity)).collect();
+        let discovered = screener::discover(http, &inputs, MAX_DISCOVERED).await;
+
+        // Tag provenance: any model-named pick the screener also surfaced is
+        // independently corroborated ("both"); the rest are "model".
+        let corroborated: BTreeSet<String> = discovered
+            .iter()
+            .map(|d| d.ticker.to_ascii_uppercase())
+            .collect();
+        for w in working.iter_mut() {
+            let both = corroborated.contains(&w.candidate.ticker.to_ascii_uppercase());
+            w.candidate.discovery = Some(if both { "both" } else { "model" }.into());
+        }
+
+        // Admit only genuinely new tickers — the model still owns the thesis for
+        // anything it named.
+        for d in discovered {
+            let key = d.ticker.to_ascii_lowercase();
+            if key.is_empty() || seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            let severity = severities.get(&d.bottleneck).copied().unwrap_or(3);
+            let thesis = if d.source == screener::SRC_EDGAR {
+                format!(
+                    "Surfaced by SEC EDGAR full-text search for “{}” — recent filings discuss this bottleneck.",
+                    d.context
+                )
+            } else {
+                format!("Surfaced by the Yahoo “{}” screener.", d.context)
+            };
+            working.push(Working {
+                severity,
+                inflection: None,
+                revisions: None,
+                candidate: Candidate {
+                    ticker: d.ticker,
+                    company: d.company,
+                    verified_name: None,
+                    identity_mismatch: false,
+                    price: None,
+                    bottleneck: d.bottleneck,
+                    thesis,
+                    moat: 3,
+                    upside: 3,
+                    upside_rationale: String::new(),
+                    growth: None,
+                    growth_score: 0.0,
+                    sentiment: None,
+                    news: Vec::new(),
+                    score: 0.0,
+                    breakdown: None,
+                    timing: None,
+                    discovery: Some(d.source.into()),
                     owned: false,
                 },
             });

@@ -15,6 +15,7 @@ mod questrade;
 mod research;
 mod robinhood;
 mod scoring;
+mod screener;
 mod settings;
 
 use std::sync::Mutex;
