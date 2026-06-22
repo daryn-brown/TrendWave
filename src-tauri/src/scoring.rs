@@ -35,12 +35,13 @@ pub enum ScoringMode {
 
 impl Default for ScoringMode {
     fn default() -> Self {
-        // Stays `Legacy` until the early-detection signals (Phases 1–4) are wired,
-        // so the live default never degrades to a signal-less reweighting. The
-        // integration phase flips this to `EarlyDetection` (the approved new
-        // default) once the blend is actually fed by real data; it remains fully
-        // reversible to `Legacy` from Settings.
-        ScoringMode::Legacy
+        // The approved new default now that every early-detection signal
+        // (inflection, estimate revisions, technical timing, insider buying,
+        // filing evidence) and the discovery screener are wired and fed by real
+        // data. Fully reversible to `Legacy` (today's exact behavior) from
+        // Settings, and every individual signal still degrades to neutral when a
+        // feed is unavailable, so this never tanks a run.
+        ScoringMode::EarlyDetection
     }
 }
 
@@ -237,6 +238,13 @@ pub fn composite_score(weights: &ScoringWeights, signals: &Signals) -> SignalBre
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped default is the early-detection blend (the approved new
+    /// default); flipping it back is a deliberate, reviewed change.
+    #[test]
+    fn default_mode_is_early_detection() {
+        assert_eq!(ScoringMode::default(), ScoringMode::EarlyDetection);
+    }
 
     /// Both presets must stay on the documented 0..100 scale.
     #[test]
