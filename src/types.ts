@@ -112,12 +112,52 @@ export interface QuestradeStatus {
   portfolio?: Portfolio | null;
 }
 
+// --- Change detection (mirrors src-tauri/src/changes.rs) -------------------
+
+export interface ChangeEntry {
+  ticker: string;
+  company: string;
+  score: number;
+  timing?: string | null;
+}
+
+export interface RankMove {
+  ticker: string;
+  company: string;
+  from: number;
+  to: number;
+}
+
+export interface ScoreMove {
+  ticker: string;
+  company: string;
+  from: number;
+  to: number;
+}
+
+export interface TimingShift {
+  ticker: string;
+  company: string;
+  from?: string | null;
+  to?: string | null;
+}
+
+export interface RunChanges {
+  new_entrants: ChangeEntry[];
+  dropped: ChangeEntry[];
+  rank_moves: RankMove[];
+  score_moves: ScoreMove[];
+  timing_shifts: TimingShift[];
+}
+
 export interface ResearchResult {
   industry: string;
   summary: string;
   bottlenecks: Bottleneck[];
   candidates: Candidate[];
   disclaimer: string;
+  /** What changed vs. the previous run of the same saved query (re-runs only). */
+  changes?: RunChanges | null;
 }
 
 // --- Buy routing (mirrors src-tauri/src/model.rs) --------------------------
@@ -138,6 +178,7 @@ export type ProgressEvent =
   | { type: "stage"; stage: string; message: string }
   | { type: "bottlenecks"; items: Bottleneck[] }
   | { type: "candidate"; candidate: Candidate }
+  | { type: "changes"; changes: RunChanges }
   | { type: "done"; result: ResearchResult }
   | { type: "failed"; kind: string; message: string };
 

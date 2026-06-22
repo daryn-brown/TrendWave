@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::changes::RunChanges;
 use crate::scoring::SignalBreakdown;
 
 /// A supply-chain / capacity / production chokepoint the model identified for
@@ -134,6 +135,11 @@ pub struct ResearchResult {
     pub bottlenecks: Vec<Bottleneck>,
     pub candidates: Vec<Candidate>,
     pub disclaimer: String,
+    /// What changed versus the previous run of the same saved query. `None` for
+    /// a first run or an ad-hoc prompt with no baseline; `#[serde(default)]`
+    /// keeps older cached results loadable.
+    #[serde(default)]
+    pub changes: Option<RunChanges>,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +248,7 @@ pub enum ProgressEvent {
     Stage { stage: String, message: String },
     Bottlenecks { items: Vec<Bottleneck> },
     Candidate { candidate: Candidate },
+    Changes { changes: RunChanges },
     Done { result: ResearchResult },
     Failed { kind: String, message: String },
 }

@@ -1,4 +1,5 @@
 mod biometric;
+mod changes;
 mod commands;
 mod db;
 mod error;

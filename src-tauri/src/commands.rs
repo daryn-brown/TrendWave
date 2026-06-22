@@ -72,7 +72,7 @@ pub async fn run_research(
     prompt: String,
     on_event: Channel<ProgressEvent>,
 ) -> AppResult<ResearchResult> {
-    execute(&state, &prompt, &on_event).await
+    execute(&state, &prompt, &on_event, None).await
 }
 
 #[tauri::command]
@@ -81,11 +81,12 @@ pub async fn run_watchlist(
     id: i64,
     on_event: Channel<ProgressEvent>,
 ) -> AppResult<ResearchResult> {
-    let prompt = {
+    let (prompt, previous) = {
         let conn = state.lock_db()?;
-        db::get_watchlist(&conn, id)?.prompt
+        let wl = db::get_watchlist(&conn, id)?;
+        (wl.prompt, wl.last_result)
     };
-    let result = execute(&state, &prompt, &on_event).await?;
+    let result = execute(&state, &prompt, &on_event, previous).await?;
     let conn = state.lock_db()?;
     db::update_watchlist_result(&conn, id, &result)?;
     Ok(result)
@@ -468,6 +469,7 @@ async fn execute(
     state: &AppState,
     prompt: &str,
     on_event: &Channel<ProgressEvent>,
+    previous: Option<ResearchResult>,
 ) -> AppResult<ResearchResult> {
     if prompt.trim().is_empty() {
         return Err(AppError::Other("Please enter a question first.".into()));
@@ -506,7 +508,7 @@ async fn execute(
         }
     }
 
-    match research::run_research(&ollama, &state.http, &settings, prompt, &owned, &emit).await {
+    match research::run_research(&ollama, &state.http, &settings, prompt, &owned, previous.as_ref(), &emit).await {
         Ok(result) => Ok(result),
         Err(err) => {
             let _ = on_event.send(ProgressEvent::Failed {

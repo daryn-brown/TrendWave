@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+use crate::changes::diff_runs;
 use crate::error::AppResult;
 use crate::feeds;
 use crate::filings;
@@ -234,6 +235,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
     settings: &Settings,
     prompt: &str,
     owned: &BTreeSet<String>,
+    previous: Option<&ResearchResult>,
     emit: &F,
 ) -> AppResult<ResearchResult> {
     emit(ProgressEvent::Stage {
@@ -639,12 +641,22 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
         candidates.push(w.candidate);
     }
 
+    // Diff against the previous run of the same saved query (if any), so the UI
+    // can show "what changed" without any background monitoring.
+    let changes = previous.map(|p| diff_runs(&p.candidates, &candidates));
+    if let Some(ch) = &changes {
+        if !ch.is_empty() {
+            emit(ProgressEvent::Changes { changes: ch.clone() });
+        }
+    }
+
     let result = ResearchResult {
         industry,
         summary,
         bottlenecks,
         candidates,
         disclaimer: DISCLAIMER.to_string(),
+        changes,
     };
     emit(ProgressEvent::Done {
         result: result.clone(),

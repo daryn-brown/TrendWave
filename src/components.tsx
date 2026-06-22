@@ -16,6 +16,7 @@ import type {
   Portfolio,
   QuestradeStatus,
   RobinhoodStatus,
+  RunChanges,
   Settings,
   Watchlist,
 } from "./types";
@@ -361,6 +362,72 @@ export function BottleneckList({ items }: { items: Bottleneck[] }) {
           </div>
         ))}
       </div>
+    </section>
+  );
+}
+
+// ---- What changed since last run (Phase 5) ----------------------------------
+
+function changesIsEmpty(c: RunChanges): boolean {
+  return (
+    c.new_entrants.length === 0 &&
+    c.dropped.length === 0 &&
+    c.rank_moves.length === 0 &&
+    c.score_moves.length === 0 &&
+    c.timing_shifts.length === 0
+  );
+}
+
+function ChangeRow({ tone, label, children }: { tone: string; label: string; children: ReactNode }) {
+  return (
+    <li className="flex items-baseline gap-2 text-sm">
+      <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ring-1 ${tone}`}>
+        {label}
+      </span>
+      <span className="text-slate-600 dark:text-slate-300">{children}</span>
+    </li>
+  );
+}
+
+export function ChangesPanel({ changes }: { changes: RunChanges }) {
+  if (changesIsEmpty(changes)) return null;
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+        What changed since last run
+      </h3>
+      <ul className="space-y-2 rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+        {changes.new_entrants.map((e) => (
+          <ChangeRow key={`new-${e.ticker}`} tone="bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30" label="New">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{e.ticker}</span> {e.company}
+            <span className="text-slate-400 dark:text-slate-500"> · score {Math.round(e.score)}</span>
+            {e.timing ? <span className="text-slate-400 dark:text-slate-500"> · {e.timing}</span> : null}
+          </ChangeRow>
+        ))}
+        {changes.timing_shifts.map((t) => (
+          <ChangeRow key={`timing-${t.ticker}`} tone="bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-500/30" label="Timing">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{t.ticker}</span>{" "}
+            {t.from ?? "—"} → {t.to ?? "—"}
+          </ChangeRow>
+        ))}
+        {changes.rank_moves.map((m) => (
+          <ChangeRow key={`rank-${m.ticker}`} tone="bg-indigo-50 text-indigo-700 ring-indigo-200 dark:bg-indigo-500/10 dark:text-indigo-300 dark:ring-indigo-500/30" label={m.to < m.from ? "Rank ↑" : "Rank ↓"}>
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{m.ticker}</span>{" "}
+            #{m.from} → #{m.to}
+          </ChangeRow>
+        ))}
+        {changes.score_moves.map((s) => (
+          <ChangeRow key={`score-${s.ticker}`} tone="bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30" label={s.to > s.from ? "Score ↑" : "Score ↓"}>
+            <span className="font-semibold text-slate-900 dark:text-slate-100">{s.ticker}</span>{" "}
+            {Math.round(s.from)} → {Math.round(s.to)}
+          </ChangeRow>
+        ))}
+        {changes.dropped.map((e) => (
+          <ChangeRow key={`drop-${e.ticker}`} tone="bg-slate-100 text-slate-500 ring-slate-200 dark:bg-slate-700/30 dark:text-slate-400 dark:ring-slate-600/40" label="Dropped">
+            <span className="font-semibold text-slate-700 dark:text-slate-300">{e.ticker}</span> {e.company} left the list
+          </ChangeRow>
+        ))}
+      </ul>
     </section>
   );
 }
