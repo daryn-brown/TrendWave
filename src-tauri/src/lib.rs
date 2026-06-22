@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod error;
 mod feeds;
+mod filings;
 mod fundamentals;
 mod inflection;
 mod mcp;

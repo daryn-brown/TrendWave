@@ -6,6 +6,7 @@ use tokio::sync::Semaphore;
 
 use crate::error::AppResult;
 use crate::feeds;
+use crate::filings;
 use crate::fundamentals::{self, YahooEnrich};
 use crate::inflection;
 use crate::model::{Bottleneck, Candidate, ProgressEvent, ResearchResult, DISCLAIMER};
@@ -119,6 +120,19 @@ struct Working {
     inflection: Option<f64>,
     revisions: Option<f64>,
     technical: Option<f64>,
+    insider: Option<f64>,
+    filing: Option<f64>,
+}
+
+/// One candidate's early-detection signals, produced concurrently and applied
+/// back to `working[idx]` after the enrichment join.
+struct Enrichment {
+    idx: usize,
+    inflection: Option<f64>,
+    revisions: Option<f64>,
+    technical: Option<technical::Technical>,
+    insider: Option<f64>,
+    filing: Option<f64>,
 }
 
 /// Legacy positional scorer used by the equivalence/monotonicity test-suite.
@@ -284,6 +298,8 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                 inflection: None,
                 revisions: None,
                 technical: None,
+                insider: None,
+                filing: None,
                 candidate: Candidate {
                     ticker,
                     company: c.company.clone(),
@@ -363,6 +379,8 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                 inflection: None,
                 revisions: None,
                 technical: None,
+                insider: None,
+                filing: None,
                 candidate: Candidate {
                     ticker: d.ticker,
                     company: d.company,
@@ -533,16 +551,29 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
                     },
                 };
                 let technical = technical::fetch_technical(&http, &ticker, &benchmark).await;
-                (idx, inflection, revisions.map(|r| r.score()), technical)
+                // Free SEC forward tells: insider open-market buying (Form 4) and
+                // capacity/pricing-power language in recent 8-Ks.
+                let filings::FilingSignals { insider, filing } =
+                    filings::fetch_signals(&http, &ticker).await;
+                Enrichment {
+                    idx,
+                    inflection,
+                    revisions: revisions.map(|r| r.score()),
+                    technical,
+                    insider,
+                    filing,
+                }
             });
         }
         while let Some(joined) = set.join_next().await {
-            if let Ok((idx, inflection, revisions, technical)) = joined {
-                working[idx].inflection = inflection;
-                working[idx].revisions = revisions;
-                if let Some(t) = technical {
-                    working[idx].technical = Some(t.score);
-                    working[idx].candidate.timing = Some(t.timing.as_str().to_string());
+            if let Ok(e) = joined {
+                working[e.idx].inflection = e.inflection;
+                working[e.idx].revisions = e.revisions;
+                working[e.idx].insider = e.insider;
+                working[e.idx].filing = e.filing;
+                if let Some(t) = e.technical {
+                    working[e.idx].technical = Some(t.score);
+                    working[e.idx].candidate.timing = Some(t.timing.as_str().to_string());
                 }
             }
         }
@@ -567,10 +598,10 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             (w.candidate.upside.clamp(1, 5) as f64) / 5.0
         };
         w.candidate.growth_score = growth;
-        // Early-detection signals (inflection, revisions, technical) are populated
-        // above in `EarlyDetection` mode and sit `None` (scored neutral) in
-        // `Legacy` mode, so this still reduces to the legacy formula exactly under
-        // legacy weights. Insider and filing terms arrive in later phases.
+        // Early-detection signals (inflection, revisions, technical, insider,
+        // filing) are populated above in `EarlyDetection` mode and sit `None`
+        // (scored neutral) in `Legacy` mode, so this still reduces to the legacy
+        // formula exactly under legacy weights.
         let signals = Signals {
             severity: w.severity,
             moat: w.candidate.moat,
@@ -580,7 +611,8 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             inflection: w.inflection,
             revisions: w.revisions,
             technical: w.technical,
-            ..Default::default()
+            insider: w.insider,
+            filing: w.filing,
         };
         let mut breakdown = scoring::composite_score(&weights, &signals);
         if w.candidate.identity_mismatch {
