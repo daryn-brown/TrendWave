@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::changes::diff_runs;
+use crate::convexity;
 use crate::error::AppResult;
 use crate::feeds;
 use crate::filings;
@@ -175,6 +176,7 @@ fn scale_breakdown(b: &mut SignalBreakdown, factor: f64) {
     b.revisions *= factor;
     b.insider *= factor;
     b.filing *= factor;
+    b.convexity *= factor;
     b.total *= factor;
 }
 
@@ -600,10 +602,26 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             (w.candidate.upside.clamp(1, 5) as f64) / 5.0
         };
         w.candidate.growth_score = growth;
+        // Room-to-run / convexity (size sweet spot + liquidity). Computed from
+        // the market cap already pulled with fundamentals and price * average
+        // volume, gated on a USD quote so the figures are comparable. Only in
+        // `EarlyDetection` mode, so `Legacy` stays byte-identical (and the term
+        // carries weight 0 there regardless).
+        let convexity = if settings.scoring_mode == ScoringMode::EarlyDetection {
+            match w.candidate.price.as_ref() {
+                Some(p) if p.currency == "USD" => {
+                    let market_cap = w.candidate.growth.as_ref().and_then(|g| g.market_cap);
+                    convexity::convexity_score(market_cap, p.price * p.avg_volume)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         // Early-detection signals (inflection, revisions, technical, insider,
-        // filing) are populated above in `EarlyDetection` mode and sit `None`
-        // (scored neutral) in `Legacy` mode, so this still reduces to the legacy
-        // formula exactly under legacy weights.
+        // filing, convexity) are populated above in `EarlyDetection` mode and sit
+        // `None` (scored neutral) in `Legacy` mode, so this still reduces to the
+        // legacy formula exactly under legacy weights.
         let signals = Signals {
             severity: w.severity,
             moat: w.candidate.moat,
@@ -615,6 +633,7 @@ pub async fn run_research<F: Fn(ProgressEvent)>(
             technical: w.technical,
             insider: w.insider,
             filing: w.filing,
+            convexity,
         };
         let mut breakdown = scoring::composite_score(&weights, &signals);
         if w.candidate.identity_mismatch {

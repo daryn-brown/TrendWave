@@ -12,8 +12,8 @@ best positioned to solve or monopolize **supply-chain / capacity bottlenecks** i
   server. A power user may *optionally* slot in a bring-your-own-key paid data source behind an
   abstraction; the key lives in the OS keychain and the app is fully functional without it.
 - **Early-detection first:** the default ranking blends competitive positioning with forward signals
-  (cyclical inflection, cycle timing, estimate revisions, insider buying, filing evidence) and a
-  screener that discovers names the prompt never mentioned — so cyclicals are flagged near the bottom
+  (cyclical inflection, cycle timing, estimate revisions, insider buying, filing evidence, room-to-run
+  size) and a screener that discovers names the prompt never mentioned — so cyclicals are flagged near the bottom
   of their cycle. A `Legacy` mode restores the original trailing-fundamentals ranking byte-for-byte.
 - **Prompt-first, calm UX:** one window. Ask a question, watch progress stream, get a ranked
   shortlist. No always-on daemon, no noisy dashboard.
@@ -52,6 +52,7 @@ prompt ─▶ run_research (command)
             ├─ keep every named pick (price is context, not a filter)
             ├─ research growth + inflection                 (SEC EDGAR annual & quarterly + revisions)
             ├─ cycle timing, insider buys, filing signals   (Yahoo charts + EDGAR, best-effort)
+            ├─ room-to-run / convexity                      (market-cap sweet spot + liquidity)
             ├─ fetch news + score sentiment                 (RSS + Ollama)
             ├─ scoring + ranking (Legacy | Early detection)
             └─ diff vs previous run                         (what changed)
@@ -74,6 +75,8 @@ prompt ─▶ run_research (command)
   (Early/Building/Extended/Late) and pure `technical_score`.
 - `filings.rs` — one `submissions` fetch reused for insider Form 4 purchases + 8-K/10-Q keyword
   signals; pure scorers.
+- `convexity.rs` — room-to-run / convexity: a log-space band-pass over market cap (small/mid-cap
+  sweet spot) gated by a liquidity floor; pure `convexity_score`, neutral when size is unknown.
 - `changes.rs` — pure `diff_runs` (new entrants / drops / rank & score moves / timing shifts).
 - `ollama.rs` — minimal local Ollama client: `ensure_ready` and `generate_json`.
 - `feeds.rs` — `fetch_price`, `resolve_symbol`, `fetch_news`.
@@ -103,8 +106,8 @@ score = 25 * (severity / 5)            // how acute the bottleneck is
 
 **Early detection** (default): trailing growth is reduced but retained, positioning stays strong,
 and forward signals carry real weight —
-`severity 20 · moat 20 · growth 18 · sentiment 6 · momentum 2 · inflection 16 · technical
-8 · revisions 6 · insider 2 · filing 2`. Each optional signal sits **neutral (0.5)** when its data
+`severity 20 · moat 20 · growth 10 · sentiment 4 · momentum 2 · inflection 16 · technical
+8 · revisions 6 · insider 2 · filing 2 · convexity 10`. Each optional signal sits **neutral (0.5)** when its data
 is unavailable, so a missing feed never penalizes a pick. A per-pick `SignalBreakdown` records each
 term's contribution for "why this ranked here" explainability. Forward signals are only fetched in
 Early-detection mode, so Legacy makes the exact same network calls and produces identical output.
@@ -151,7 +154,8 @@ settings modal (ranking mode, market-data source + key management, toggles). Typ
 - [x] Bottleneck-weighted ranking
 - [x] Real growth research (SEC EDGAR fundamentals + Yahoo enrichment) driving the growth score
 - [x] Early-detection ranking: discovery (EDGAR full-text + Yahoo screeners), cyclical inflection &
-  estimate revisions, cycle timing, insider & filing signals, with a `Legacy` byte-identical mode
+  estimate revisions, cycle timing, insider & filing signals, room-to-run / convexity size lens,
+  with a `Legacy` byte-identical mode
 - [x] Optional BYO-key paid data provider (keychain-stored, free fallback)
 - [x] On-demand change detection ("what changed since last run")
 - [x] Backtest fixtures (Micron @ 2023 trough, SanDisk @ 2025 relisting) validating early detection

@@ -34,7 +34,8 @@ fn score(mode: ScoringMode, s: &Signals) -> f64 {
 /// fundamentals look *worst* — revenue roughly halved, a large annual loss —
 /// exactly when forward signals are turning: losses narrowing, revenue
 /// re-accelerating off the low, estimates revised up, and capacity/shortage
-/// language returning to filings.
+/// language returning to filings. At a ~$65B cap it is a strong cyclical call
+/// but has only modest room to *multiply* (a great double, not a 10x).
 fn micron_2023_trough() -> Case {
     Case {
         label: "Micron (FY2023 trough)",
@@ -49,6 +50,7 @@ fn micron_2023_trough() -> Case {
             revisions: Some(0.78),
             insider: Some(0.6),
             filing: Some(0.8),
+            convexity: Some(0.40), // ~$65B: real, but limited multi-bag room
         },
         eventual_winner: true,
     }
@@ -56,7 +58,8 @@ fn micron_2023_trough() -> Case {
 
 /// SanDisk at its Feb-2025 relisting (as-of ~2025-02-21): a post-cutoff name the
 /// local LLM never knew, early in a fresh memory upcycle — limited trailing
-/// history (neutral growth, not a penalty) but a constructive forward setup.
+/// history (neutral growth, not a penalty) but a constructive forward setup. At
+/// a ~$6B cap it has genuine room to run, the meteoric size sweet spot.
 fn sandisk_2025_relist() -> Case {
     Case {
         label: "SanDisk (2025 relisting)",
@@ -71,6 +74,7 @@ fn sandisk_2025_relist() -> Case {
             revisions: Some(0.68),
             insider: None,
             filing: Some(0.7),
+            convexity: Some(0.95), // ~$6B: small/mid-cap room to multiply
         },
         eventual_winner: true,
     }
@@ -93,6 +97,7 @@ fn late_cycle_trap() -> Case {
             revisions: Some(0.28),
             insider: None,
             filing: Some(0.25),
+            convexity: Some(0.55), // ~$25B mid-cap: size won't save a bad setup
         },
         eventual_winner: false,
     }
@@ -114,6 +119,7 @@ fn stable_no_catalyst() -> Case {
             revisions: None,
             insider: None,
             filing: None,
+            convexity: None, // size unknown → neutral, never a penalty
         },
         eventual_winner: false,
     }
@@ -197,5 +203,19 @@ fn early_detection_puts_both_winners_in_the_top_two() {
     assert!(
         top2.contains("Micron (FY2023 trough)") && top2.contains("SanDisk (2025 relisting)"),
         "early-detection should put both winners in the top two, got {early:?}"
+    );
+}
+
+/// The meteoric size lens: between two winning setups, the smaller-cap name with
+/// real room to multiply (SanDisk, ~$6B) should edge out the larger one whose
+/// upside is more bounded (Micron, ~$65B). This is exactly the reframed goal —
+/// surfacing names that can *still* have a meteoric, multi-bag run.
+#[test]
+fn room_to_run_favors_the_smaller_winner() {
+    let micron = score(ScoringMode::EarlyDetection, &micron_2023_trough().signals);
+    let sandisk = score(ScoringMode::EarlyDetection, &sandisk_2025_relist().signals);
+    assert!(
+        sandisk > micron,
+        "room-to-run should lift the smaller-cap winner (sandisk {sandisk:.1} > micron {micron:.1})"
     );
 }

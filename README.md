@@ -31,7 +31,7 @@ flowchart LR
     S --> C
     C --> D[Price feeds<br/>Yahoo / free]
     D --> E[Growth + inflection<br/>SEC EDGAR quarterly]
-    E --> T[Cycle timing · insiders · filings<br/>Yahoo + EDGAR]
+    E --> T[Cycle timing · insiders · filings · room-to-run<br/>Yahoo + EDGAR]
     T --> F[News + sentiment<br/>RSS + Ollama]
     F --> G[Early-detection<br/>ranking]
     G --> H[Ranked picks + what changed]
@@ -59,8 +59,12 @@ trailing-fundamentals ranking byte-for-byte.
 5. **Cycle timing, insiders & filings** — Early-detection adds a **timing label** (Early / Building /
    Extended / Late) from multi-timeframe price action and relative strength, **insider-buying**
    clusters (SEC Form 4), and **filing evidence** (8-K / 10-Q capacity & pricing-power language).
-6. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
-7. **Rank & track changes** — a transparent blend combines positioning, growth and the
+6. **Room to run** — Early-detection also weighs **size**: it favors the small/mid-cap sweet spot
+   (~$1B-$20B) with enough liquidity to trade, so names that can still *multiply* outrank mega-caps
+   that have already had their run. It reuses the market cap pulled with fundamentals and stays
+   neutral when size is unknown.
+7. **News & sentiment** — recent headlines are pulled per ticker and scored locally by the model.
+8. **Rank & track changes** — a transparent blend combines positioning, growth and the
    early-detection signals; each pick can explain its score. Re-running a watchlist shows **what
    changed since last run** (new entrants, rank/score moves, timing shifts). Share price is never a
    filter.
@@ -191,7 +195,7 @@ Open **Settings** from the sidebar to tune:
 | Ollama model | `llama3.1:8b` | Any locally installed model |
 | Ollama endpoint | `http://localhost:11434` | Where the local server listens |
 | Max results | `8` | Cap on returned picks |
-| Ranking mode | Early detection | **Early detection** adds forward signals (inflection, cycle timing, estimate revisions, insider buys, filing evidence) and screener discovery; **Legacy** restores the original trailing-fundamentals ranking byte-for-byte |
+| Ranking mode | Early detection | **Early detection** adds forward signals (inflection, cycle timing, estimate revisions, insider buys, filing evidence, room-to-run) and screener discovery; **Legacy** restores the original trailing-fundamentals ranking byte-for-byte |
 | Market-data source | Free | Free (SEC EDGAR + Yahoo) by default; optionally bring your own paid key (FMP) for cleaner estimates, stored in the OS keychain |
 | Scan news & sentiment | on | Pull headlines and score sentiment (slower) |
 | Research real growth | on | Pull SEC EDGAR + Yahoo fundamentals to drive the growth score (slower) |
@@ -223,6 +227,7 @@ TrendWave/
 │   ├── inflection.rs    # Quarterly EDGAR inflection + estimate-revision signals
 │   ├── technical.rs     # Cycle timing / relative strength (Early/Building/Extended/Late)
 │   ├── filings.rs       # Insider Form 4 + 8-K/10-Q keyword signals (EDGAR)
+│   ├── convexity.rs     # Room-to-run / convexity (market-cap sweet spot + liquidity)
 │   ├── changes.rs       # Run-over-run change detection (what changed since last run)
 │   ├── ollama.rs        # Local Ollama client
 │   ├── feeds.rs         # Free price + news feeds (Yahoo)

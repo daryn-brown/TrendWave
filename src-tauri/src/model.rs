@@ -63,6 +63,9 @@ pub struct GrowthData {
     pub forward_pe: Option<f64>,
     /// Analyst mean-target implied upside vs. current price, as a fraction.
     pub analyst_upside: Option<f64>,
+    /// Market capitalization in the quote currency (Yahoo enrichment). Drives the
+    /// room-to-run / convexity signal; `None` when Yahoo is unavailable.
+    pub market_cap: Option<f64>,
     /// Number of fiscal years the EDGAR series spans (context for CAGR).
     pub years: Option<u32>,
     /// Whether the YoY growth figures are audited *annual* results (from EDGAR).

@@ -469,6 +469,27 @@ function discoveryLabel(d?: string | null): string | null {
   return null; // "model" is the default origin — no badge needed
 }
 
+/// Glanceable "room to run" size badge: the meteoric size lens at a glance. Only
+/// shown for USD quotes (where the cap is directly comparable, matching the
+/// convexity scorer's gate). Smaller caps get the optimistic emerald treatment.
+function roomBadge(
+  marketCap?: number | null,
+  currency?: string | null,
+): { label: string; cls: string } | null {
+  if (currency !== "USD" || marketCap == null || !Number.isFinite(marketCap) || marketCap <= 0) {
+    return null;
+  }
+  const b = marketCap / 1e9; // billions USD
+  const value = b >= 100 ? `$${Math.round(b)}B` : b >= 1 ? `$${b.toFixed(1)}B` : `$${Math.round(b * 1000)}M`;
+  const room =
+    b < 20
+      ? { tag: "Room to run", cls: "bg-emerald-50 text-emerald-700 ring-emerald-100 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/20" }
+      : b < 100
+        ? { tag: "Some room", cls: "bg-amber-50 text-amber-700 ring-amber-100 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/20" }
+        : { tag: "Limited room", cls: "bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-500/10 dark:text-slate-300 dark:ring-slate-500/20" };
+  return { label: `${room.tag} · ${value}`, cls: room.cls };
+}
+
 const BREAKDOWN_TERMS: { key: keyof SignalBreakdown; label: string; forward?: boolean }[] = [
   { key: "severity", label: "Bottleneck severity" },
   { key: "moat", label: "Moat / positioning" },
@@ -480,6 +501,7 @@ const BREAKDOWN_TERMS: { key: keyof SignalBreakdown; label: string; forward?: bo
   { key: "revisions", label: "Estimate revisions", forward: true },
   { key: "insider", label: "Insider buying", forward: true },
   { key: "filing", label: "Filing evidence", forward: true },
+  { key: "convexity", label: "Room to run", forward: true },
 ];
 
 function ScoreBreakdownPanel({ breakdown }: { breakdown: SignalBreakdown }) {
@@ -613,6 +635,14 @@ export function CandidateCard({
             {discoveryLabel(candidate.discovery)}
           </span>
         )}
+        {(() => {
+          const room = roomBadge(candidate.growth?.market_cap, candidate.price?.currency);
+          return room ? (
+            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${room.cls}`}>
+              {room.label}
+            </span>
+          ) : null;
+        })()}
         {!candidate.identity_mismatch &&
           (candidate.growth?.revenue_growth_yoy != null ? (
             <span

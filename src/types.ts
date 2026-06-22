@@ -22,6 +22,7 @@ export interface GrowthData {
   profitable?: boolean | null;
   forward_pe?: number | null;
   analyst_upside?: number | null;
+  market_cap?: number | null;
   years?: number | null;
   annual_growth?: boolean;
   source: string;
@@ -48,6 +49,7 @@ export interface SignalBreakdown {
   revisions: number;
   insider: number;
   filing: number;
+  convexity: number;
   total: number;
 }
 

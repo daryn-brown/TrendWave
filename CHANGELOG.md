@@ -29,6 +29,11 @@ accumulated notes from `## [Unreleased]` into a new `## [x.y.z] - YYYY-MM-DD` se
   - **Insider buying** — flags clusters of open-market insider purchases (SEC Form 4).
   - **Filing evidence** — scans recent 8-K / 10-Q language for capacity, shortage and
     pricing-power tells.
+  - **Room to run (convexity)** — favors the small/mid-cap "sweet spot" (~$1B-$20B) with
+    enough liquidity to actually trade, so names that still have the size headroom for a
+    *meteoric* multi-bag rank above mega-caps that have already had their run. Uses market
+    cap already fetched with fundamentals (no extra requests) and sits neutral when size is
+    unknown, so it never penalizes a pick it can't size.
 - **Candidate discovery.** A new screener surfaces names you didn't prompt for — via SEC EDGAR
   full-text search on the bottleneck terms and Yahoo screeners — so tickers and spinoffs the
   local model never heard of (e.g. a recent relisting) can still appear. Each pick is tagged with

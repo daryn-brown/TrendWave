@@ -81,6 +81,7 @@ fn build_growth(edgar: Option<EdgarOut>, yahoo: Option<YahooMetrics>) -> Option<
     if let Some(y) = yahoo {
         g.forward_pe = y.forward_pe;
         g.analyst_upside = y.analyst_upside;
+        g.market_cap = y.market_cap;
         // Only fall back to Yahoo's growth figures where EDGAR was silent.
         if g.revenue_growth_yoy.is_none() {
             g.revenue_growth_yoy = y.revenue_growth;
@@ -414,6 +415,17 @@ pub struct YahooMetrics {
     pub analyst_upside: Option<f64>,
     pub revenue_growth: Option<f64>,
     pub earnings_growth: Option<f64>,
+    pub market_cap: Option<f64>,
+}
+
+/// Read `marketCap` from a `quoteSummary` result node's `price` module. Yahoo
+/// wraps numbers as `{ "raw": <f64>, "fmt": "..." }`; a positive finite raw is
+/// required, otherwise the size signal stays neutral. Pure, so it is unit-tested
+/// against a sample payload (the live handshake needs cookies + a crumb).
+fn quote_market_cap(node: &serde_json::Value) -> Option<f64> {
+    node["price"]["marketCap"]["raw"]
+        .as_f64()
+        .filter(|mc| mc.is_finite() && *mc > 0.0)
 }
 
 /// A primed Yahoo session: a cookie-jar client plus a fetched crumb. Cloneable
@@ -501,6 +513,10 @@ impl YahooEnrich {
             analyst_upside,
             revenue_growth: raw(&financial["revenueGrowth"]),
             earnings_growth: raw(&financial["earningsGrowth"]),
+            // Market cap comes from the `price` module already in this payload,
+            // so the room-to-run signal costs no extra request. It is reported in
+            // the quote currency; the scorer is gated on a USD quote downstream.
+            market_cap: quote_market_cap(node),
         })
     }
 
@@ -676,6 +692,7 @@ mod tests {
                 analyst_upside: Some(0.05),
                 revenue_growth: Some(0.264),
                 earnings_growth: Some(0.1),
+                market_cap: Some(5_000_000_000.0),
             }),
         )
         .unwrap();
@@ -689,6 +706,26 @@ mod tests {
         // Yahoo's inflated 1124.4 for a London pence quote is really ~11.2.
         let pe = sane_forward_pe(1124.4, subunit_factor("GBp")).unwrap();
         assert!((pe - 11.244).abs() < 1e-3);
+    }
+
+    #[test]
+    fn market_cap_parsed_from_price_module() {
+        // Representative `quoteSummary` result node shape (the `price` module is
+        // already requested for currency + forward P/E, so this is free data).
+        let node = serde_json::json!({
+            "price": { "currency": "USD", "marketCap": { "raw": 6_120_000_000.0, "fmt": "6.12B" } }
+        });
+        assert_eq!(quote_market_cap(&node), Some(6_120_000_000.0));
+    }
+
+    #[test]
+    fn market_cap_absent_or_invalid_is_neutral() {
+        assert_eq!(quote_market_cap(&serde_json::json!({ "price": {} })), None);
+        assert_eq!(
+            quote_market_cap(&serde_json::json!({ "price": { "marketCap": { "raw": 0.0 } } })),
+            None
+        );
+        assert_eq!(quote_market_cap(&serde_json::json!({})), None);
     }
 
     #[test]

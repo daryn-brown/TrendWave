@@ -3,6 +3,7 @@ mod backtest;
 mod biometric;
 mod changes;
 mod commands;
+mod convexity;
 mod db;
 mod error;
 mod feeds;

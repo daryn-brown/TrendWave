@@ -62,6 +62,8 @@ pub struct ScoringWeights {
     pub revisions: f64,
     pub insider: f64,
     pub filing: f64,
+    /// Room-to-run / convexity (market-cap sweet spot + liquidity). 0 under legacy.
+    pub convexity: f64,
 }
 
 impl ScoringWeights {
@@ -79,26 +81,29 @@ impl ScoringWeights {
             revisions: 0.0,
             insider: 0.0,
             filing: 0.0,
+            convexity: 0.0,
         }
     }
 
     /// The early-detection blend. Positioning (severity + moat) stays strong;
     /// trailing growth is reduced but retained and the freed weight moves to
     /// forward signals — inflection (cyclical turns), cycle-timing, estimate
-    /// revisions, insider buying and filing evidence. Sums to 100 so scores stay
-    /// comparable to legacy.
+    /// revisions, insider buying, filing evidence — and to **convexity**
+    /// (room-to-run: the market-cap sweet spot that makes a *meteoric* multi-bag
+    /// possible at all). Sums to 100 so scores stay comparable to legacy.
     pub const fn early_detection() -> Self {
         Self {
             severity: 20.0,
             moat: 20.0,
-            growth: 18.0,
-            sentiment: 6.0,
+            growth: 10.0,
+            sentiment: 4.0,
             momentum: 2.0,
             inflection: 16.0,
             technical: 8.0,
             revisions: 6.0,
             insider: 2.0,
             filing: 2.0,
+            convexity: 10.0,
         }
     }
 
@@ -122,6 +127,7 @@ impl ScoringWeights {
             + self.revisions
             + self.insider
             + self.filing
+            + self.convexity
     }
 }
 
@@ -158,6 +164,8 @@ pub struct Signals {
     pub insider: Option<f64>,
     /// Primary-source filing evidence of the bottleneck, `0..1`; `None` neutral.
     pub filing: Option<f64>,
+    /// Room-to-run / convexity (size sweet spot + liquidity), `0..1`; `None` neutral.
+    pub convexity: Option<f64>,
 }
 
 /// The weighted contribution of every term plus the composite `total`. Returned
@@ -175,6 +183,7 @@ pub struct SignalBreakdown {
     pub revisions: f64,
     pub insider: f64,
     pub filing: f64,
+    pub convexity: f64,
     /// The composite score (sum of the contributions above), on the `0..100` scale.
     pub total: f64,
 }
@@ -205,6 +214,7 @@ pub fn composite_score(weights: &ScoringWeights, signals: &Signals) -> SignalBre
     let revisions_n = neutral(signals.revisions);
     let insider_n = neutral(signals.insider);
     let filing_n = neutral(signals.filing);
+    let convexity_n = neutral(signals.convexity);
 
     let mut breakdown = SignalBreakdown {
         severity: weights.severity * severity_n,
@@ -217,6 +227,7 @@ pub fn composite_score(weights: &ScoringWeights, signals: &Signals) -> SignalBre
         revisions: weights.revisions * revisions_n,
         insider: weights.insider * insider_n,
         filing: weights.filing * filing_n,
+        convexity: weights.convexity * convexity_n,
         total: 0.0,
     };
     breakdown.total = breakdown.severity
@@ -228,7 +239,8 @@ pub fn composite_score(weights: &ScoringWeights, signals: &Signals) -> SignalBre
         + breakdown.technical
         + breakdown.revisions
         + breakdown.insider
-        + breakdown.filing;
+        + breakdown.filing
+        + breakdown.convexity;
     // Every normalized signal is in 0..=1, so the composite can never exceed the
     // sum of the weights. Guards against a future weight/term wiring mistake.
     debug_assert!(breakdown.total <= weights.total() + 1e-9);
@@ -288,11 +300,40 @@ mod tests {
             revisions: Some(1.0),
             insider: Some(1.0),
             filing: Some(0.0),
+            convexity: Some(1.0),
             ..base
         };
         let a = composite_score(&ScoringWeights::legacy(), &base).total;
         let b = composite_score(&ScoringWeights::legacy(), &enriched).total;
         assert!((a - b).abs() < 1e-9);
+    }
+
+    /// Room-to-run must lift a small/mid-cap pick under the early-detection blend
+    /// — the whole point of the meteoric size lens. A high-convexity name should
+    /// outscore an otherwise identical one stuck at neutral size.
+    #[test]
+    fn convexity_lifts_small_cap_in_early_mode() {
+        let base = Signals {
+            severity: 4,
+            moat: 4,
+            growth: 0.5,
+            sentiment: None,
+            change_pct: 0.0,
+            ..Default::default()
+        };
+        let roomy = Signals {
+            convexity: Some(0.95),
+            ..base
+        };
+        let crowded = Signals {
+            convexity: Some(0.05),
+            ..base
+        };
+        let w = ScoringWeights::early_detection();
+        assert!(
+            composite_score(&w, &roomy).total > composite_score(&w, &crowded).total,
+            "a small-cap with room should outrank a mega-cap with none"
+        );
     }
 
     /// A strong cyclical inflection must lift a pick under the early-detection
@@ -352,6 +393,7 @@ mod tests {
                 revisions: Some(1.0),
                 insider: Some(1.0),
                 filing: Some(1.0),
+                convexity: Some(1.0),
             },
         )
         .total;
@@ -368,6 +410,7 @@ mod tests {
                 revisions: Some(0.0),
                 insider: Some(0.0),
                 filing: Some(0.0),
+                convexity: Some(0.0),
             },
         )
         .total;
