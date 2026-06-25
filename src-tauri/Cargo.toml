@@ -40,7 +40,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "sync-s
 # Native biometric unlock (macOS Touch ID / Windows Hello) gating the saved
 # Robinhood session. App-enforced gate, not a keychain ACL.
 robius-authentication = "0.1.1"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 rand = "0.8"
 # Read total physical RAM during first-run onboarding so we can recommend a
